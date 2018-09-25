@@ -24,6 +24,10 @@ defmodule Ecto.Multi do
   transaction. If any changeset has errors, the transaction won't even
   be started and the error will be immediately returned.
 
+  Note: `insert/4`, `update/4`, `insert_or_update/4`, and `delete/4`
+  variants that accept a function are not performing such checks since
+  the functions are executed after the transaction has started.
+
   ## Run
 
   Multi allows you to run arbitrary functions as part of your transaction
@@ -93,6 +97,20 @@ defmodule Ecto.Multi do
         assert log_changeset.valid?
         assert inspect(query) == "#Ecto.Query<from a in Session>"
       end
+
+  The name of each operation does not have to be an atom. This can be particularly
+  useful when you wish to update a collection of changesets at once, and track their
+  errors individually:
+
+      accounts = [%Account{id: 1}, %Account{id: 2}]
+
+      Enum.reduce(accounts, Multi.new(), fn account, multi ->
+        Multi.update(
+          multi,
+          {:account, account.id},
+          Account.password_reset_changeset(account, params)
+        )
+      end)
   """
 
   alias __MODULE__
@@ -100,8 +118,10 @@ defmodule Ecto.Multi do
 
   defstruct operations: [], names: MapSet.new
 
-  @type run :: ((Ecto.Repo.t, map) -> {:ok | :error, any}) | {module, atom, [any]}
-  @type merge :: (map -> t) | {module, atom, [any]}
+  @type changes :: map
+  @type run :: ((Ecto.Repo.t, changes) -> {:ok | :error, any}) | {module, atom, [any]}
+  @type fun(result) :: (changes -> result)
+  @type merge :: (changes -> t) | {module, atom, [any]}
   @typep schema_or_source :: binary | {binary | nil, binary} | atom
   @typep operation :: {:changeset, Changeset.t, Keyword.t} |
                       {:run, run} |
@@ -194,8 +214,15 @@ defmodule Ecto.Multi do
   `prepend/2`.
 
   Duplicated operations are not allowed.
+
+  ## Example
+
+      Ecto.Multi.merge(multi, fn %{post: post} ->
+        Ecto.Multi.new()
+        |> Ecto.Multi.insert(:comment, Ecto.build_assoc(post, :comments))
+      end)
   """
-  @spec merge(t, (map -> t)) :: t
+  @spec merge(t, (changes -> t)) :: t
   def merge(%Multi{} = multi, merge) when is_function(merge, 1) do
     Map.update!(multi, :operations, &[{:merge, {:merge, merge}} | &1])
   end
@@ -222,20 +249,31 @@ defmodule Ecto.Multi do
 
   ## Example
 
-      post = %Post{title: "first"}
-      multi = Ecto.Multi.new |> Ecto.Multi.insert(:insert, post)
-      MyApp.Repo.transaction(multi)
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:insert, %Post{title: "first"})
+      |> MyApp.Repo.transaction()
+
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:post, %Post{title: "first"})
+      |> Ecto.Multi.insert(:comment, fn %{post: post} ->
+           Ecto.build_assoc(post, :comments)
+         end)
+      |> MyApp.Repo.transaction()
 
   """
-  @spec insert(t, name, Changeset.t | Ecto.Schema.t, Keyword.t) :: t
-  def insert(multi, name, changeset_or_struct, opts \\ [])
+  @spec insert(t, name, Changeset.t | Ecto.Schema.t | fun(Changeset.t | Ecto.Schema.t), Keyword.t) :: t
+  def insert(multi, name, changeset_or_struct_or_fun, opts \\ [])
 
   def insert(multi, name, %Changeset{} = changeset, opts) do
     add_changeset(multi, :insert, name, changeset, opts)
   end
 
-  def insert(multi, name, struct, opts) do
+  def insert(multi, name, %_{} = struct, opts) do
     insert(multi, name, Changeset.change(struct), opts)
+  end
+
+  def insert(multi, name, fun, opts) when is_function(fun, 1) do
+    run(multi, name, operation_fun(:insert, opts, fun))
   end
 
   @doc """
@@ -246,14 +284,28 @@ defmodule Ecto.Multi do
   ## Example
 
       post = MyApp.Repo.get!(Post, 1)
-      post = Ecto.Changeset.change post, title: "New title"
-      multi = Ecto.Multi.new |> Ecto.Multi.update(:update, post)
-      MyApp.Repo.transaction(multi)
+      changeset = Ecto.Changeset.change(post, title: "New title")
+      Ecto.Multi.new()
+      |> Ecto.Multi.update(:update, changeset)
+      |> MyApp.Repo.transaction()
+
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:post, %Post{title: "first"})
+      |> Ecto.Multi.update(:fun, %{post: post} ->
+           Ecto.Changeset.change(post, title: "New title")
+         end)
+      |> MyApp.Repo.transaction()
 
   """
-  @spec update(t, name, Changeset.t, Keyword.t) :: t
-  def update(multi, name, %Changeset{} = changeset, opts \\ []) do
+  @spec update(t, name, Changeset.t | fun(Changeset.t), Keyword.t) :: t
+  def update(multi, name, changeset_or_fun, opts \\ [])
+
+  def update(multi, name, %Changeset{} = changeset, opts) do
     add_changeset(multi, :update, name, changeset, opts)
+  end
+
+  def update(multi, name, fun, opts) when is_function(fun, 1) do
+    run(multi, name, operation_fun(:update, opts, fun))
   end
 
   @doc """
@@ -263,23 +315,34 @@ defmodule Ecto.Multi do
 
   ## Example
 
-      post = Post.changeset(%Post{}, %{title: "New title"})
-      multi = Ecto.Multi.new |> Ecto.Multi.insert_or_update(:insert_or_update, post)
-      MyApp.Repo.transaction(multi)
+      changeset = Post.changeset(%Post{}, %{title: "New title"})
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert_or_update(:insert_or_update, changeset)
+      |> MyApp.Repo.transaction()
 
-      post = MyApp.Repo.get!(Post, 1)
-      post = Post.changeset(post, %{title: "Updated title"})
-      multi = Ecto.Multi.new |> Ecto.Multi.insert_or_update(:insert_or_update, post)
-      MyApp.Repo.transaction(multi)
+      Ecto.Multi.new()
+      |> Ecto.Multi.run(:post, fn _repo ->
+           MyApp.Repo.get!(Post, 1)
+         end)
+      |> Ecto.Multi.insert_or_update(:update, fn %{post: post} ->
+           Ecto.Changeset.change(post, title: "New title")
+         end)
+      |> MyApp.Repo.transaction()
 
   """
-  @spec insert_or_update(t, name, Changeset.t , Keyword.t) :: t
+  @spec insert_or_update(t, name, Changeset.t | fun(Changeset.t), Keyword.t) :: t
   def insert_or_update(multi, name, changeset, opts \\ [])
+
   def insert_or_update(multi, name, %Changeset{data: %{__meta__: %{state: :loaded}}} = changeset, opts) do
     add_changeset(multi, :update, name, changeset, opts)
   end
+
   def insert_or_update(multi, name, %Changeset{} = changeset, opts) do
     add_changeset(multi, :insert, name, changeset, opts)
+  end
+
+  def insert_or_update(multi, name, fun, opts) when is_function(fun, 1) do
+    run(multi, name, operation_fun(:insert_or_update, opts, fun))
   end
 
   @doc """
@@ -290,19 +353,34 @@ defmodule Ecto.Multi do
   ## Example
 
       post = MyApp.Repo.get!(Post, 1)
-      multi = Ecto.Multi.new |> Ecto.Multi.delete(:delete, post)
-      MyApp.Repo.transaction(multi)
+      Ecto.Multi.new()
+      |> Ecto.Multi.delete(:delete, post)
+      |> MyApp.Repo.transaction()
+
+      Ecto.Multi.new()
+      |> Ecto.Multi.run(:post, fn _repo ->
+           MyApp.Repo.get!(Post, 1)
+         end)
+      |> Ecto.Multi.delete(:delete, fn %{post: post} ->
+           # Others validations
+           post
+         end)
+      |> MyApp.Repo.transaction()
 
   """
-  @spec delete(t, name, Changeset.t | Ecto.Schema.t, Keyword.t) :: t
-  def delete(multi, name, changeset_or_struct, opts \\ [])
+  @spec delete(t, name, Changeset.t | Ecto.Schema.t | fun(Changeset.t | Ecto.Schema.t), Keyword.t) :: t
+  def delete(multi, name, changeset_or_struct_fun, opts \\ [])
 
   def delete(multi, name, %Changeset{} = changeset, opts) do
     add_changeset(multi, :delete, name, changeset, opts)
   end
 
-  def delete(multi, name, struct, opts) do
+  def delete(multi, name, %_{} = struct, opts) do
     delete(multi, name, Changeset.change(struct), opts)
+  end
+
+  def delete(multi, name, fun, opts) when is_function(fun, 1) do
+    run(multi, name, operation_fun(:delete, opts, fun))
   end
 
   defp add_changeset(multi, action, name, changeset, opts) when is_list(opts) do
@@ -340,6 +418,12 @@ defmodule Ecto.Multi do
   The function should return either `{:ok, value}` or `{:error, value}`,
   and receives the repo as the first argument, and the changes so far
   as the second argument.
+
+  ## Example
+
+      Ecto.Multi.run(multi, fn _repo, %{image: image} ->
+        File.write!(image.name, image.contents)
+      end)
   """
   @spec run(t, name, run) :: t
   def run(multi, name, run) when is_function(run, 1) do
@@ -374,12 +458,12 @@ defmodule Ecto.Multi do
   ## Example
 
       posts = [%{title: "My first post"}, %{title: "My second post"}]
-      multi = Ecto.Multi.new |> Ecto.Multi.insert_all(:insert_all, Post, posts)
-      MyApp.Repo.transaction(multi)
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert_all(:insert_all, Post, posts)
+      |> MyApp.Repo.transaction()
 
   """
-  @spec insert_all(t, name, schema_or_source, [entry], Keyword.t) :: t
-        when entry: map | Keyword.t
+  @spec insert_all(t, name, schema_or_source, [map | Keyword.t], Keyword.t) :: t
   def insert_all(multi, name, schema_or_source, entries, opts \\ []) when is_list(opts) do
     add_operation(multi, name, {:insert_all, schema_or_source, entries, opts})
   end
@@ -388,6 +472,13 @@ defmodule Ecto.Multi do
   Adds an update_all operation to the multi.
 
   Accepts the same arguments and options as `c:Ecto.Repo.update_all/3` does.
+
+  ## Example
+
+      Ecto.Multi.new()
+      |> Ecto.Multi.update_all(:update_all, Post, set: [title: "New title"])
+      |> MyApp.Repo.transaction()
+
   """
   @spec update_all(t, name, Ecto.Queryable.t, Keyword.t, Keyword.t) :: t
   def update_all(multi, name, queryable, updates, opts \\ []) when is_list(opts) do
@@ -403,8 +494,9 @@ defmodule Ecto.Multi do
   ## Example
 
       queryable = from(p in Post, where: p.id < 5)
-      multi = Ecto.Multi.new |> Ecto.Multi.delete_all(:delete_all, queryable)
-      MyApp.Repo.transaction(multi)
+      Ecto.Multi.new()
+      |> Ecto.Multi.delete_all(:delete_all, queryable)
+      |> MyApp.Repo.transaction()
 
   """
   @spec delete_all(t, name, Ecto.Queryable.t, Keyword.t) :: t
@@ -488,6 +580,8 @@ defmodule Ecto.Multi do
         {Map.put(acc, name, value), names}
       {:error, value} ->
         return.({name, value, acc})
+      other ->
+        raise "expected Ecto.Multi callback named `#{inspect(name)}` to return either {:ok, value} or {:error, value}, got: #{inspect(other)}"
     end
   end
 
@@ -498,11 +592,11 @@ defmodule Ecto.Multi do
   defp apply_operation({:error, value}, _acc, _apply_args, _repo),
     do: {:error, value}
   defp apply_operation({:insert_all, source, entries, opts}, _acc, _apply_args, repo),
-    do: {:ok, repo.insert_all(source, entries, opts)}
+    do: {:ok, Ecto.Repo.Schema.insert_all(repo, source, entries, opts)}
   defp apply_operation({:update_all, query, updates, opts}, _acc, _apply_args, repo),
-    do: {:ok, repo.update_all(query, updates, opts)}
+    do: {:ok, Ecto.Repo.Queryable.update_all(repo, query, updates, opts)}
   defp apply_operation({:delete_all, query, opts}, _acc, _apply_args, repo),
-    do: {:ok, repo.delete_all(query, opts)}
+    do: {:ok, Ecto.Repo.Queryable.delete_all(repo, query, opts)}
 
   defp apply_merge_fun({mod, fun, args}, acc), do: apply(mod, fun, [acc | args])
   defp apply_merge_fun(fun, acc), do: apply(fun, [acc])
@@ -518,6 +612,12 @@ defmodule Ecto.Multi do
       common ->
         raise "cannot merge multi, the following operations were found in " <>
           "both Ecto.Multi: #{inspect common}"
+    end
+  end
+
+  defp operation_fun(operation, opts, fun) do
+    fn repo, changes ->
+      apply(repo, operation, [fun.(changes), opts])
     end
   end
 end

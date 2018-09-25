@@ -78,10 +78,6 @@ defmodule Ecto.Query.BuilderTest do
   end
 
   test "escape raise" do
-    assert_raise Ecto.Query.CompileError, ~r"variable `x` is not a valid query expression", fn ->
-      escape(quote(do: x), [], __ENV__)
-    end
-
     assert_raise Ecto.Query.CompileError, ~r"is not a valid query expression. Only literal binaries and strings are allowed", fn ->
       escape(quote(do: "#{x}"), [], __ENV__)
     end
@@ -112,6 +108,12 @@ defmodule Ecto.Query.BuilderTest do
 
     assert_raise Ecto.Query.CompileError, ~r"expected literal atom or interpolated value", fn ->
       escape(quote(do: field(x, 123)), [x: 0], __ENV__) |> elem(0) |> Code.eval_quoted([], __ENV__)
+    end
+
+    assert_raise Ecto.Query.CompileError,
+                 ~r"make sure that the module Foo is required and that bar/1 is a macro",
+                 fn ->
+      escape(quote(do: Foo.bar(x)), [x: 0], __ENV__) |> elem(0) |> Code.eval_quoted([], __ENV__)
     end
   end
 
@@ -171,6 +173,7 @@ defmodule Ecto.Query.BuilderTest do
     assert quoted_type({:not, [], [1]}, []) == :boolean
 
     assert quoted_type({:count, [], [1]}, []) == :integer
+    assert quoted_type({:count, [], []}, []) == :integer
     assert quoted_type({:max, [], [1]}, []) == :integer
     assert quoted_type({:avg, [], [1]}, []) == :any
 

@@ -22,7 +22,7 @@ defmodule Ecto.LogEntry do
   alias Ecto.LogEntry
 
   @type t :: %LogEntry{query: String.t | (t -> String.t), source: String.t | Enum.t | nil,
-                       params: [term], query_time: integer, decode_time: integer | nil,
+                       params: [term], query_time: integer | nil, decode_time: integer | nil,
                        queue_time: integer | nil, connection_pid: pid | nil,
                        result: {:ok, term} | {:error, Exception.t},
                        ansi_color: IO.ANSI.ansicode | nil, caller_pid: pid | nil}
@@ -31,6 +31,39 @@ defmodule Ecto.LogEntry do
             queue_time: nil, result: nil, connection_pid: nil, caller_pid: nil, ansi_color: nil
 
   require Logger
+
+  @doc """
+  Validates the MFAs to be applied.
+  """
+  def validate!(mfas) do
+    unless is_list(mfas) do
+      raise ArgumentError, "expected loggers to be a list, got: #{inspect(mfas)}"
+    end
+
+    Enum.each(mfas, fn
+      mod when is_atom(mod) ->
+        :ok
+
+      {Ecto.LogEntry, :log, [level]} when not (level in [:error, :info, :warn, :debug]) ->
+        raise ArgumentError, "the log level #{inspect(level)} is not supported in Ecto.LogEntry"
+
+      {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+        :ok
+    end)
+  end
+
+  @doc """
+  Applies the given entry to the mfas.
+  """
+  def apply(entry, mfas) do
+    Enum.reduce(mfas, entry, fn
+      mod, acc when is_atom(mod) ->
+        mod.log(acc)
+
+      {mod, fun, args}, acc ->
+        apply(mod, fun, [acc | args])
+    end)
+  end
 
   @doc """
   Logs the given entry in debug mode.
@@ -89,7 +122,7 @@ defmodule Ecto.LogEntry do
 
   defp time(_label, nil, _force), do: []
   defp time(label, time, force) do
-    us = System.convert_time_unit(time, :native, :micro_seconds)
+    us = System.convert_time_unit(time, :native, :microsecond)
     ms = div(us, 100) / 10
     if force or ms > 0 do
       [?\s, label, ?=, :io_lib_format.fwrite_g(ms), ?m, ?s]

@@ -4,6 +4,7 @@ defmodule Mix.Tasks.Ecto.Gen.Migration do
   import Macro, only: [camelize: 1, underscore: 1]
   import Mix.Generator
   import Mix.Ecto
+  import Mix.EctoSQL
 
   @shortdoc "Generates a new migration for the repo"
 
@@ -42,7 +43,7 @@ defmodule Mix.Tasks.Ecto.Gen.Migration do
     no_umbrella!("ecto.gen.migration")
     repos = parse_repo(args)
 
-    Enum.each repos, fn repo ->
+    Enum.map repos, fn repo ->
       case OptionParser.parse(args, switches: @switches) do
         {opts, [name], _} ->
           ensure_repo(repo, args)
@@ -60,8 +61,11 @@ defmodule Mix.Tasks.Ecto.Gen.Migration do
           create_file file, migration_template(assigns)
 
           if open?(file) and Mix.shell.yes?("Do you want to run this migration?") do
-            Mix.Task.run "ecto.migrate", [repo]
+            Mix.Task.run "ecto.migrate", ["-r", inspect(repo)]
           end
+
+          file
+
         {_, _, _} ->
           Mix.raise "expected ecto.gen.migration to receive the migration file name, " <>
                     "got: #{inspect Enum.join(args, " ")}"

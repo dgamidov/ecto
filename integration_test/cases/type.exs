@@ -3,7 +3,7 @@ Code.require_file "../support/types.exs", __DIR__
 defmodule Ecto.Integration.TypeTest do
   use Ecto.Integration.Case, async: Application.get_env(:ecto, :async_integration_tests, true)
 
-  alias Ecto.Integration.{Custom, Item, Order, Post, User, Tag}
+  alias Ecto.Integration.{Custom, Item, ItemColor, Order, Post, User, Tag, Article}
   alias Ecto.Integration.TestRepo
   import Ecto.Query
 
@@ -49,9 +49,22 @@ defmodule Ecto.Integration.TypeTest do
     assert [^datetime] = TestRepo.all(from p in Post, where: p.inserted_at == ^datetime, select: p.inserted_at)
 
     # Datetime
-    datetime = DateTime.from_unix!(System.system_time(:seconds), :seconds)
+    datetime = DateTime.from_unix!(System.system_time(:second), :second)
     TestRepo.insert!(%User{inserted_at: datetime})
     assert [^datetime] = TestRepo.all(from u in User, where: u.inserted_at == ^datetime, select: u.inserted_at)
+
+    # usec
+    naive_datetime = ~N[2014-01-16 20:26:51.000000]
+    datetime = DateTime.from_naive!(~N[2014-01-16 20:26:51.000000], "Etc/UTC")
+    TestRepo.insert!(%Article{published_at: naive_datetime, submitted_at: datetime})
+    assert [^naive_datetime] = TestRepo.all(from u in Article, where: u.published_at == ^naive_datetime, select: u.published_at)
+    assert [^datetime] = TestRepo.all(from u in Article, where: u.submitted_at == ^datetime, select: u.submitted_at)
+
+    naive_datetime = ~N[2014-01-16 20:26:51.123000]
+    datetime = DateTime.from_naive!(~N[2014-01-16 20:26:51.123000], "Etc/UTC")
+    TestRepo.insert!(%Article{published_at: naive_datetime, submitted_at: datetime})
+    assert [^naive_datetime] = TestRepo.all(from u in Article, where: u.published_at == ^naive_datetime, select: u.published_at)
+    assert [^datetime] = TestRepo.all(from u in Article, where: u.submitted_at == ^datetime, select: u.submitted_at)
   end
 
   test "aggregate types" do
@@ -180,7 +193,7 @@ defmodule Ecto.Integration.TypeTest do
   end
 
   @tag :map_type
-  test "typed map" do
+  test "typed string map" do
     post1 = TestRepo.insert!(%Post{links: %{"foo" => "http://foo.com", "bar" => "http://bar.com"}})
     post2 = TestRepo.insert!(%Post{links: %{foo: "http://foo.com", bar: "http://bar.com"}})
 
@@ -188,6 +201,15 @@ defmodule Ecto.Integration.TypeTest do
            [%{"foo" => "http://foo.com", "bar" => "http://bar.com"}]
     assert TestRepo.all(from p in Post, where: p.id == ^post2.id, select: p.links) ==
            [%{"foo" => "http://foo.com", "bar" => "http://bar.com"}]
+  end
+
+  @tag :map_type
+  test "typed float map" do
+    post = TestRepo.insert!(%Post{intensities: %{"foo" => 1.0, "bar" => 416500.0}})
+
+    # Note we are using === since we want to check integer vs float
+    assert TestRepo.all(from p in Post, where: p.id == ^post.id, select: p.intensities) ===
+           [%{"foo" => 1.0, "bar" => 416500.0}]
   end
 
   @tag :map_type
@@ -247,6 +269,32 @@ defmodule Ecto.Integration.TypeTest do
 
     {1, _} = TestRepo.update_all(Tag, set: [items: [%{dbitem | price: 456}]])
     assert (TestRepo.get!(Tag, tag.id).items |> hd).price == 456
+  end
+
+  @tag :map_type
+  @tag :array_type
+  test "nested embeds" do
+    red = %ItemColor{name: "red"}
+    blue = %ItemColor{name: "blue"}
+    item = %Item{
+      primary_color: red,
+      secondary_colors: [blue]
+    }
+
+    order =
+      %Order{}
+      |> Ecto.Changeset.change
+      |> Ecto.Changeset.put_embed(:item, item)
+    order = TestRepo.insert!(order)
+    dbitem = TestRepo.get!(Order, order.id).item
+    assert item.primary_color == dbitem.primary_color
+    assert item.secondary_colors == dbitem.secondary_colors
+    assert dbitem.id
+
+    [dbitem] = TestRepo.all(from o in Order, select: o.item)
+    assert item.primary_color == dbitem.primary_color
+    assert item.secondary_colors == dbitem.secondary_colors
+    assert dbitem.id
   end
 
   @tag :decimal_type

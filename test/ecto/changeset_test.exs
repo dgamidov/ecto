@@ -249,6 +249,10 @@ defmodule Ecto.ChangesetTest do
     assert_raise FunctionClauseError, fn ->
       cast(%Post{}, %{}, %{})
     end
+
+    assert_raise FunctionClauseError, fn ->
+      cast(%Post{}, %{"title" => "foo"}, nil)
+    end
   end
 
   test "cast/4: protects against atom injection" do
@@ -281,6 +285,19 @@ defmodule Ecto.ChangesetTest do
     assert validations(changeset) == []
     assert changeset.required == []
     assert changeset.valid?
+  end
+
+  test "cast/4: semantic comparison" do
+    changeset = cast(%Post{decimal: Decimal.new(1)}, %{decimal: "1.0"}, ~w(decimal)a)
+    assert changeset.changes == %{}
+    changeset = cast(%Post{decimal: Decimal.new(1)}, %{decimal: "1.1"}, ~w(decimal)a)
+    assert changeset.changes == %{decimal: Decimal.new("1.1")}
+
+    {data, types} = {%{x: [Decimal.new(1)]}, %{x: {:array, :decimal}}}
+    changeset = cast({data, types}, %{x: [Decimal.new("1.0")]}, ~w(x)a)
+    assert changeset.changes == %{}
+    changeset = cast({data, types}, %{x: [Decimal.new("1.1")]}, ~w(x)a)
+    assert changeset.changes == %{x: [Decimal.new("1.1")]}
   end
 
   ## Changeset functions
@@ -471,6 +488,12 @@ defmodule Ecto.ChangesetTest do
 
     changeset = change(base_changeset, %{title: "new title", upvotes: 5})
     assert changeset.changes == %{title: "new title"}
+  end
+
+  test "change/2 semantic comparison" do
+    post = %Post{decimal: Decimal.new("1.0")}
+    changeset = change(post, decimal: Decimal.new(1))
+    assert changeset.changes == %{}
   end
 
   test "fetch_field/2" do
@@ -743,6 +766,12 @@ defmodule Ecto.ChangesetTest do
     assert_raise ArgumentError, ~r/expects field names to be atoms, got: `"title"`/, fn ->
       changeset(%{"title" => "hello"})
       |> validate_required("title")
+    end
+
+    # When field is nil
+    assert_raise FunctionClauseError, fn ->
+      changeset(%{"title" => "hello"})
+      |> validate_required(nil)
     end
   end
 

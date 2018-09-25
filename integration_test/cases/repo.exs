@@ -19,6 +19,11 @@ defmodule Ecto.Integration.RepoTest do
     assert {:error, {:already_started, _}} = TestRepo.start_link
   end
 
+  test "supports unnamed repos" do
+    assert {:ok, pid} = TestRepo.start_link(name: nil)
+    assert Ecto.Repo.Queryable.all(pid, Post, []) == []
+  end
+
   test "fetch empty" do
     assert TestRepo.all(Post) == []
     assert TestRepo.all(from p in Post) == []
@@ -243,7 +248,7 @@ defmodule Ecto.Integration.RepoTest do
   end
 
   test "insert and fetch a schema with utc timestamps" do
-    datetime = DateTime.from_unix!(System.system_time(:seconds), :seconds)
+    datetime = DateTime.from_unix!(System.system_time(:second), :second)
     TestRepo.insert!(%User{inserted_at: datetime})
     assert [%{inserted_at: ^datetime}] = TestRepo.all(User)
   end
@@ -702,9 +707,29 @@ defmodule Ecto.Integration.RepoTest do
 
     query = from p in Post, where: is_nil(p.id)
     refute query |> first |> TestRepo.one
-    refute query |> first |> TestRepo.one
+    refute query |> last |> TestRepo.one
     assert_raise Ecto.NoResultsError, fn -> query |> first |> TestRepo.one! end
     assert_raise Ecto.NoResultsError, fn -> query |> last |> TestRepo.one! end
+  end
+
+  test "exists?" do
+    TestRepo.insert!(%Post{title: "1", text: "hai", visits: 2})
+    TestRepo.insert!(%Post{title: "2", text: "hai", visits: 1})
+
+    query = from p in Post, where: not is_nil(p.title), limit: 2
+    assert query |> TestRepo.exists? == true
+
+    query = from p in Post, where: p.title == "1", select: p.title
+    assert query |> TestRepo.exists? == true
+
+    query = from p in Post, where: is_nil(p.id)
+    assert query |> TestRepo.exists? == false
+
+    query = from p in Post, where: is_nil(p.id)
+    assert query |> TestRepo.exists? == false
+
+    query = from(p in Post, select: {p.visits, avg(p.visits)}, group_by: p.visits, having: avg(p.visits) > 1)
+    assert query |> TestRepo.exists? == true
   end
 
   test "aggregate" do
@@ -1420,6 +1445,25 @@ defmodule Ecto.Integration.RepoTest do
       assert updated.id == inserted.id
       assert updated.title != "second"
       assert TestRepo.get!(Post, inserted.id).title == "second"
+    end
+
+    @tag :with_conflict_target
+    test "on conflict query having condition" do
+      post = %Post{title: "first", counter: 1, uuid: Ecto.UUID.generate()}
+      {:ok, inserted} = TestRepo.insert(post)
+
+      on_conflict = from Post, where: [counter: 2], update: [set: [title: "second"]]
+
+      insert_options = [
+        on_conflict: on_conflict,
+        conflict_target: [:uuid],
+        stale_error_field: :counter
+      ]
+
+      assert {:error, changeset} = TestRepo.insert(post, insert_options)
+      assert changeset.errors == [counter: {"is stale", [stale: true]}]
+
+      assert TestRepo.get!(Post, inserted.id).title == "first"
     end
 
     @tag :without_conflict_target

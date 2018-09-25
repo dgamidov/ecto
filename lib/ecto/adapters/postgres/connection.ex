@@ -51,7 +51,7 @@ if Code.ensure_loaded?(Postgrex) do
       end
     end
 
-    def to_constraints(%Postgrex.Error{}),
+    def to_constraints(_),
       do: []
 
     defp strip_quotes(quoted) do
@@ -63,44 +63,26 @@ if Code.ensure_loaded?(Postgrex) do
     ## Query
 
     def prepare_execute(conn, name, sql, params, opts) do
-      query = %Postgrex.Query{name: name, statement: sql}
-      opts  = [function: :prepare_execute] ++ opts
-      case DBConnection.prepare_execute(conn, query, params, opts) do
+      Postgrex.prepare_execute(conn, name, sql, params, opts)
+    end
+
+    def query(conn, sql, params, opts) do
+      Postgrex.query(conn, sql, params, opts)
+    end
+
+    def execute(conn, %{ref: ref} = query, params, opts) do
+      case Postgrex.execute(conn, query, params, opts) do
+        {:ok, %{ref: ^ref}, result} ->
+          {:ok, result}
+
         {:ok, _, _} = ok ->
           ok
-        {:error, %Postgrex.Error{}} = error ->
-          error
-        {:error, err} ->
-          raise err
-      end
-    end
 
-    def execute(conn, sql, params, opts) when is_binary(sql) or is_list(sql) do
-      query = %Postgrex.Query{name: "", statement: sql}
-      opts  = [function: :prepare_execute] ++ opts
-      case DBConnection.prepare_execute(conn, query, params, opts) do
-        {:ok, _, result}  ->
-          {:ok, result}
-        {:error, %Postgrex.Error{}} = error ->
-          error
-        {:error, err} ->
-          raise err
-      end
-    end
-
-    def execute(conn, %{} = query, params, opts) do
-      opts = [function: :execute] ++ opts
-      case DBConnection.execute(conn, query, params, opts) do
-        {:ok, _} = ok ->
-          ok
-        {:error, %ArgumentError{} = err} ->
-          {:reset, err}
         {:error, %Postgrex.Error{postgres: %{code: :feature_not_supported}} = err} ->
           {:reset, err}
-        {:error, %Postgrex.Error{}} = error ->
+
+        {:error, _} = error ->
           error
-        {:error, err} ->
-          raise err
       end
     end
 
@@ -163,8 +145,8 @@ if Code.ensure_loaded?(Postgrex) do
        values, on_conflict(on_conflict, header) | returning(returning)]
     end
 
-    defp insert_as({%{from: from} = query, _, _}) do
-      {_, name} = get_source(%{query | joins: []}, create_names(query), 0, from)
+    defp insert_as({%{sources: sources}, _, _}) do
+      {_expr, name, _schema} = create_name(sources, 0)
       [" AS " | name]
     end
     defp insert_as({_, _, _}) do
@@ -182,6 +164,8 @@ if Code.ensure_loaded?(Postgrex) do
 
     defp conflict_target({:constraint, constraint}),
       do: ["ON CONSTRAINT ", quote_name(constraint), ?\s]
+    defp conflict_target({:unsafe_fragment, fragment}),
+      do: [fragment, ?\s]
     defp conflict_target([]),
       do: []
     defp conflict_target(targets),
@@ -281,6 +265,10 @@ if Code.ensure_loaded?(Postgrex) do
        exprs}
     end
 
+    defp from(%{from: %{hints: [_ | _]}} = query, _sources) do
+      error!(query, "table hints are not supported by PostgreSQL")
+    end
+
     defp from(%{from: %{source: source}} = query, sources) do
       {from, name} = get_source(query, sources, 0, source)
       [" FROM ", from, " AS " | name]
@@ -313,7 +301,7 @@ if Code.ensure_loaded?(Postgrex) do
     end
 
     defp update_op(command, _key, _value, _sources, query) do
-      error!(query, "Unknown update operation #{inspect command} for PostgreSQL")
+      error!(query, "unknown update operation #{inspect command} for PostgreSQL")
     end
 
     defp using_join(%Query{joins: []}, _kind, _prefix, _sources), do: {[], []}
@@ -338,7 +326,11 @@ if Code.ensure_loaded?(Postgrex) do
     defp join(%Query{joins: []}, _sources), do: []
     defp join(%Query{joins: joins} = query, sources) do
       [?\s | intersperse_map(joins, ?\s, fn
-        %JoinExpr{on: %QueryExpr{expr: expr}, qual: qual, ix: ix, source: source} ->
+        %JoinExpr{on: %QueryExpr{expr: expr}, qual: qual, ix: ix, source: source, hints: hints} ->
+          if hints != [] do
+            error!(query, "table hints are not supported by PostgreSQL")
+          end
+
           {join, name} = get_source(query, sources, ix, source)
           [join_qual(qual), join, " AS ", name | join_on(qual, expr, sources, query)]
       end)]
@@ -381,9 +373,14 @@ if Code.ensure_loaded?(Postgrex) do
 
     defp order_by_expr({dir, expr}, sources, query) do
       str = expr(expr, sources, query)
+
       case dir do
         :asc  -> str
+        :asc_nulls_last -> [str | " ASC NULLS LAST"]
+        :asc_nulls_first -> [str | " ASC NULLS FIRST"]
         :desc -> [str | " DESC"]
+        :desc_nulls_last -> [str | " DESC NULLS LAST"]
+        :desc_nulls_first -> [str | " DESC NULLS FIRST"]
       end
     end
 
@@ -434,10 +431,9 @@ if Code.ensure_loaded?(Postgrex) do
       quote_qualified_name(field, sources, idx)
     end
 
-    defp expr({:&, _, [idx]}, sources, query) do
-      {source, _name, _schema} = elem(sources, idx)
-      error!(query, "PostgreSQL does not support selecting all fields from #{source} without a schema. " <>
-                    "Please specify a schema or specify exactly which fields you want to select")
+    defp expr({:&, _, [idx]}, sources, _query) do
+      {_, source, _} = elem(sources, idx)
+      source
     end
 
     defp expr({:in, _, [_left, []]}, _sources, _query) do
@@ -499,6 +495,8 @@ if Code.ensure_loaded?(Postgrex) do
     defp expr({:{}, _, elems}, sources, query) do
       [?(, intersperse_map(elems, ?,, &expr(&1, sources, query)), ?)]
     end
+
+    defp expr({:count, _, []}, _sources, _query), do: "count(*)"
 
     defp expr({fun, _, args}, sources, query) when is_atom(fun) and is_list(args) do
       {modifier, args} =
@@ -587,26 +585,30 @@ if Code.ensure_loaded?(Postgrex) do
     defp returning(returning),
       do: [" RETURNING " | intersperse_map(returning, ", ", &quote_name/1)]
 
-    defp create_names(%{prefix: prefix, sources: sources}) do
-      create_names(prefix, sources, 0, tuple_size(sources)) |> List.to_tuple()
+    defp create_names(%{sources: sources}) do
+      create_names(sources, 0, tuple_size(sources)) |> List.to_tuple()
     end
 
-    defp create_names(prefix, sources, pos, limit) when pos < limit do
-      current =
-        case elem(sources, pos) do
-          {table, schema} ->
-            name = [create_alias(table) | Integer.to_string(pos)]
-            {quote_table(prefix, table), name, schema}
-          {:fragment, _, _} ->
-            {nil, [?f | Integer.to_string(pos)], nil}
-          %Ecto.SubQuery{} ->
-            {nil, [?s | Integer.to_string(pos)], nil}
-        end
-      [current | create_names(prefix, sources, pos + 1, limit)]
+    defp create_names(sources, pos, limit) when pos < limit do
+      [create_name(sources, pos) | create_names(sources, pos + 1, limit)]
     end
 
-    defp create_names(_prefix, _sources, pos, pos) do
+    defp create_names(_sources, pos, pos) do
       []
+    end
+
+    defp create_name(sources, pos) do
+      case elem(sources, pos) do
+        {:fragment, _, _} ->
+          {nil, [?f | Integer.to_string(pos)], nil}
+
+        {table, schema, prefix} ->
+          name = [create_alias(table) | Integer.to_string(pos)]
+          {quote_table(prefix, table), name, schema}
+
+        %Ecto.SubQuery{} ->
+          {nil, [?s | Integer.to_string(pos)], nil}
+      end
     end
 
     defp create_alias(<<first, _rest::binary>>) when first in ?a..?z when first in ?A..?Z do
@@ -770,12 +772,12 @@ if Code.ensure_loaded?(Postgrex) do
     end
 
     defp column_change(table, {:modify, name, %Reference{} = ref, opts}) do
-      ["ALTER COLUMN ", quote_name(name), " TYPE ", reference_column_type(ref.type, opts),
+      [drop_constraint_expr(opts[:from], table, name), "ALTER COLUMN ", quote_name(name), " TYPE ", reference_column_type(ref.type, opts),
        constraint_expr(ref, table, name), modify_null(name, opts), modify_default(name, ref.type, opts)]
     end
 
-    defp column_change(_table, {:modify, name, type, opts}) do
-      ["ALTER COLUMN ", quote_name(name), " TYPE ",
+    defp column_change(table, {:modify, name, type, opts}) do
+      [drop_constraint_expr(opts[:from], table, name), "ALTER COLUMN ", quote_name(name), " TYPE ",
        column_type(type, opts), modify_null(name, opts), modify_default(name, type, opts)]
     end
 
@@ -820,7 +822,16 @@ if Code.ensure_loaded?(Postgrex) do
     defp default_type(list, {:array, inner} = type) when is_list(list) do
       ["ARRAY[",  Enum.map(list, &default_type(&1, inner)) |> Enum.intersperse(?,), "]::", ecto_to_db(type)]
     end
-    defp default_type(literal, _type) when is_binary(literal),  do: [?', escape_string(literal), ?']
+    defp default_type(literal, _type) when is_binary(literal) do
+      if :binary.match(literal, <<0>>) == :nomatch and String.valid?(literal) do
+        [?', escape_string(literal), ?']
+      else
+        encoded = "\\x" <> Base.encode16(literal, case: :lower)
+        raise ArgumentError, "default values are interpolated as UTF-8 strings and cannot contain null bytes. " <>
+                             "`#{inspect literal}` is invalid. If you want to write it as a binary, use \"#{encoded}\", " <>
+                             "otherwise refer to PostgreSQL documentation for instructions on how to escape this SQL type"
+      end
+    end
     defp default_type(literal, _type) when is_number(literal),  do: to_string(literal)
     defp default_type(literal, _type) when is_boolean(literal), do: to_string(literal)
     defp default_type(%{} = map, :map) do
@@ -887,6 +898,11 @@ if Code.ensure_loaded?(Postgrex) do
            "FOREIGN KEY (", quote_name(name),
            ") REFERENCES ", quote_table(table.prefix, ref.table), ?(, quote_name(ref.column), ?),
            reference_on_delete(ref.on_delete), reference_on_update(ref.on_update)]
+
+    defp drop_constraint_expr(%Reference{} = ref, table, name),
+      do: ["DROP CONSTRAINT ", reference_name(ref, table, name), ", "]
+    defp drop_constraint_expr(_, _, _),
+      do: []
 
     defp reference_name(%Reference{name: nil}, table, column),
       do: quote_name("#{table.name}_#{column}_fkey")

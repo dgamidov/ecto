@@ -38,6 +38,7 @@ defmodule Ecto.Integration.Post do
     field :uuid, Ecto.UUID, autogenerate: true
     field :meta, :map
     field :links, {:map, :string}
+    field :intensities, {:map, :float}
     field :posted, :date
     has_many :comments, Ecto.Integration.Comment, on_delete: :delete_all, on_replace: :delete
     has_one :permalink, Ecto.Integration.Permalink, on_delete: :delete_all, on_replace: :delete
@@ -213,6 +214,23 @@ defmodule Ecto.Integration.Item do
   embedded_schema do
     field :price, :integer
     field :valid_at, :date
+
+    embeds_one :primary_color, Ecto.Integration.ItemColor
+    embeds_many :secondary_colors, Ecto.Integration.ItemColor
+  end
+end
+
+defmodule Ecto.Integration.ItemColor do
+  @moduledoc """
+  This module is used to test:
+
+    * Nested embeds
+
+  """
+  use Ecto.Schema
+
+  embedded_schema do
+    field :name, :string
   end
 end
 

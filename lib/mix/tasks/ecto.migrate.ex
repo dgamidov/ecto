@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.Ecto.Migrate do
   use Mix.Task
   import Mix.Ecto
+  import Mix.EctoSQL
 
   @shortdoc "Runs the repository migrations"
 
@@ -51,11 +52,12 @@ defmodule Mix.Tasks.Ecto.Migrate do
     * `-r`, `--repo` - the repo to migrate
     * `--all` - run all pending migrations
     * `--step` / `-n` - run n number of pending migrations
-    * `--to` / `-v` - run all migrations up to and including version
+    * `--to` - run all migrations up to and including version
     * `--quiet` - do not log migration commands
     * `--prefix` - the prefix to run migrations on
     * `--pool-size` - the pool size if the repository is started only for the task (defaults to 1)
     * `--log-sql` - log the raw sql migrations are running
+    * `--strict-version-order` - abort when applying a migration with old timestamp
 
   """
 
@@ -65,8 +67,9 @@ defmodule Mix.Tasks.Ecto.Migrate do
 
     {opts, _, _} = OptionParser.parse args,
       switches: [all: :boolean, step: :integer, to: :integer, quiet: :boolean,
-                 prefix: :string, pool_size: :integer, log_sql: :boolean],
-      aliases: [n: :step, v: :to]
+                 prefix: :string, pool_size: :integer, log_sql: :boolean,
+                 strict_version_order: :boolean],
+      aliases: [n: :step]
 
     opts =
       if opts[:to] || opts[:step] || opts[:all],
@@ -91,7 +94,7 @@ defmodule Mix.Tasks.Ecto.Migrate do
           migrator.(repo, :up, opts)
         end
 
-      pid && repo.stop(pid)
+      pid && repo.stop()
       restart_apps_if_migrated(apps, migrated)
     end
   end

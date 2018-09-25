@@ -2,8 +2,7 @@ defmodule Ecto.Adapters.Postgres do
   @moduledoc """
   Adapter module for PostgreSQL.
 
-  It uses `postgrex` for communicating to the database
-  and a connection pool, such as `poolboy`.
+  It uses `postgrex` for communicating to the database.
 
   ## Features
 
@@ -18,30 +17,21 @@ defmodule Ecto.Adapters.Postgres do
   Postgres options split in different categories described
   below. All options can be given via the repository
   configuration:
-  
+
       config :your_app, YourApp.Repo,
-        adapter: Ecto.Adapters.Postgres,
         ...
-
-  Non-compile time options can also be returned from the
-  repository `init/2` callback.
-
-  ### Compile time options
-
-  Those options should be set in the config file and require
-  recompilation in order to make an effect.
-
-    * `:adapter` - The adapter name, in this case, `Ecto.Adapters.Postgres`
 
   ### Connection options
 
-    * `:pool` - The connection pool module, defaults to `DBConnection.Poolboy`
+    * `:pool` - The connection pool module, defaults to `DBConnection.ConnectionPool`
     * `:pool_timeout` - The default timeout to use on pool calls, defaults to `5000`
     * `:timeout` - The default timeout to use on queries, defaults to `15000`
     * `:hostname` - Server hostname
     * `:port` - Server port (default: 5432)
     * `:username` - Username
     * `:password` - User password
+    * `:maintenance_database` - Specifies the name of the database to connect to when
+      creating or dropping the database. Defaults to `"postgres"`
     * `:ssl` - Set to true if ssl should be used (default: false)
     * `:ssl_opts` - A list of ssl options, see Erlang's `ssl` docs
     * `:parameters` - Keyword list of connection parameters
@@ -105,6 +95,8 @@ defmodule Ecto.Adapters.Postgres do
   @behaviour Ecto.Adapter.Storage
   @behaviour Ecto.Adapter.Structure
 
+  @default_maintenance_database "postgres"
+
   @doc """
   All Ecto extensions for Postgrex.
   """
@@ -115,6 +107,7 @@ defmodule Ecto.Adapters.Postgres do
   # Support arrays in place of IN
   @doc false
   def dumpers({:embed, _} = type, _),  do: [&Ecto.Adapters.SQL.dump_embed(type, &1)]
+  def dumpers({:map, _} = type, _),    do: [&Ecto.Adapters.SQL.dump_embed(type, &1)]
   def dumpers({:in, sub}, {:in, sub}), do: [{:array, sub}]
   def dumpers(:binary_id, type),       do: [type, Ecto.UUID]
   def dumpers(_, type),                do: [type]
@@ -125,7 +118,8 @@ defmodule Ecto.Adapters.Postgres do
   def storage_up(opts) do
     database = Keyword.fetch!(opts, :database) || raise ":database is nil in repository configuration"
     encoding = opts[:encoding] || "UTF8"
-    opts     = Keyword.put(opts, :database, "postgres")
+    maintenance_database = Keyword.get(opts, :maintenance_database, @default_maintenance_database)
+    opts = Keyword.put(opts, :database, maintenance_database)
 
     command =
       ~s(CREATE DATABASE "#{database}" ENCODING '#{encoding}')
@@ -150,7 +144,8 @@ defmodule Ecto.Adapters.Postgres do
   def storage_down(opts) do
     database = Keyword.fetch!(opts, :database) || raise ":database is nil in repository configuration"
     command  = "DROP DATABASE \"#{database}\""
-    opts     = Keyword.put(opts, :database, "postgres")
+    maintenance_database = Keyword.get(opts, :maintenance_database, @default_maintenance_database)
+    opts = Keyword.put(opts, :database, maintenance_database)
 
     case run_query(command, opts) do
       {:ok, _} ->
@@ -215,7 +210,9 @@ defmodule Ecto.Adapters.Postgres do
   @doc false
   def structure_load(default, config) do
     path = config[:dump_path] || Path.join(default, "structure.sql")
-    case run_with_cmd("psql", config, ["--quiet", "--file", path, config[:database]]) do
+    args = ["--quiet", "--file", path, "-vON_ERROR_STOP=1",
+            "--single-transaction", config[:database]]
+    case run_with_cmd("psql", config, args) do
       {_output, 0} -> {:ok, path}
       {output, _}  -> {:error, output}
     end
@@ -228,16 +225,16 @@ defmodule Ecto.Adapters.Postgres do
 
     opts =
       opts
-      |> Keyword.drop([:name, :log])
-      |> Keyword.put(:pool, DBConnection.Connection)
+      |> Keyword.drop([:name, :log, :pool, :pool_size])
       |> Keyword.put(:backoff_type, :stop)
+      |> Keyword.put(:max_restarts, 0)
 
     {:ok, pid} = Task.Supervisor.start_link
 
     task = Task.Supervisor.async_nolink(pid, fn ->
       {:ok, conn} = Postgrex.start_link(opts)
 
-      value = Ecto.Adapters.Postgres.Connection.execute(conn, sql, [], opts)
+      value = Postgrex.query(conn, sql, [], opts)
       GenServer.stop(conn)
       value
     end)

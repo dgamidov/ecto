@@ -66,8 +66,9 @@ defmodule Ecto.Migrator do
     * `:log` - the level to use for logging. Defaults to `:info`.
       Can be any of `Logger.level/0` values or `false`.
     * `:prefix` - the prefix to run the migrations on
+    * `:strict_version_order` - abort when applying a migration with old timestamp
   """
-  @spec up(Ecto.Repo.t, integer, module, Keyword.t) :: :ok | :already_up | no_return
+  @spec up(Ecto.Repo.t, integer, module, Keyword.t) :: :ok | :already_up
   def up(repo, version, module, opts \\ []) do
     verbose_schema_migration repo, "create schema migrations table", fn ->
       SchemaMigration.ensure_schema_migrations_table!(repo, opts[:prefix])
@@ -77,7 +78,31 @@ defmodule Ecto.Migrator do
       if version in versions do
         :already_up
       else
-        do_up(repo, version, module, opts)
+        result = do_up(repo, version, module, opts)
+
+        if version != Enum.max([version | versions]) do
+          latest = Enum.max(versions)
+
+          message = """
+          You are running migration #{version} but an older \
+          migration with version #{latest} has already run.
+
+          This can be an issue if you have already ran #{latest} in production \
+          because a new deployment may migrate #{version} but a rollback command \
+          would revert #{latest} instead of #{version}.
+
+          If this can be an issue, we recommend to rollback #{version} and change \
+          it to a version later than #{latest}.
+          """
+
+          if opts[:strict_version_order] do
+            raise Ecto.MigrationError, message
+          else
+            Logger.warn message
+          end
+        end
+
+        result
       end
     end
   end
@@ -110,7 +135,7 @@ defmodule Ecto.Migrator do
     * `:prefix` - the prefix to run the migrations on
 
   """
-  @spec down(Ecto.Repo.t, integer, module) :: :ok | :already_down | no_return
+  @spec down(Ecto.Repo.t, integer, module) :: :ok | :already_down
   def down(repo, version, module, opts \\ []) do
     verbose_schema_migration repo, "create schema migrations table", fn ->
       SchemaMigration.ensure_schema_migrations_table!(repo, opts[:prefix])
@@ -255,12 +280,15 @@ defmodule Ecto.Migrator do
 
   defp lock_for_migrations(repo, opts, fun) do
     query = SchemaMigration.versions(repo, opts[:prefix])
+    meta = Ecto.Adapter.lookup_meta(repo)
 
-    case repo.__adapter__.lock_for_migrations(repo, query, opts, fun) do
+    case repo.__adapter__.lock_for_migrations(meta, query, opts, &fun.(repo.all(&1))) do
       {kind, reason, stacktrace} ->
         :erlang.raise(kind, reason, stacktrace)
+
       {:error, error} ->
         raise error
+
       result ->
         result
     end

@@ -7,8 +7,9 @@ defimpl Inspect, for: Ecto.Query.DynamicExpr do
   def inspect(%DynamicExpr{binding: binding} = dynamic, opts) do
     {expr, binding, params, _, _} =
       Ecto.Query.Builder.Dynamic.fully_expand(%Ecto.Query{joins: Enum.drop(binding, 1)}, dynamic)
-    names =
-      for {name, _, _} <- binding, do: Atom.to_string(name)
+
+    names = for {name, _, _} <- binding, do: Atom.to_string(name)
+
     inspected =
       Inspect.Ecto.Query.expr(expr, List.to_tuple(names), %{expr: expr, params: params})
 
@@ -47,7 +48,7 @@ defimpl Inspect, for: Ecto.Query do
       |> generate_names
       |> List.to_tuple
 
-    from      = bound_from(query.from, elem(names, 0))
+    from      = bound_from(query.from, binding(names, 0))
     joins     = joins(query.joins, names)
     preloads  = preloads(query.preloads)
     assocs    = assocs(query.assocs, names)
@@ -69,8 +70,8 @@ defimpl Inspect, for: Ecto.Query do
   end
 
   defp bound_from(nil, name), do: ["from #{name} in query"]
-  defp bound_from(%{source: source, as: as}, name) do
-    ["from #{name} in #{inspect_source source}"] ++ kw_inspect(:as, as)
+  defp bound_from(%{source: source} = from, name) do
+    ["from #{name} in #{inspect_source source}"] ++ kw_as_and_prefix(from)
   end
 
   defp inspect_source(%Ecto.Query{} = query), do: "^" <> inspect(query)
@@ -84,22 +85,22 @@ defimpl Inspect, for: Ecto.Query do
   defp joins(joins, names) do
     joins
     |> Enum.with_index
-    |> Enum.flat_map(fn {expr, ix} -> join(expr, elem(names, expr.ix || ix + 1), names) end)
+    |> Enum.flat_map(fn {expr, ix} -> join(expr, binding(names, expr.ix || ix + 1), names) end)
   end
 
-  defp join(%JoinExpr{qual: qual, assoc: {ix, right}, on: on, as: as}, name, names) do
-    string = "#{name} in assoc(#{elem(names, ix)}, #{inspect right})"
-    [{join_qual(qual), string}] ++ kw_inspect(:as, as) ++ maybe_on(on, names)
+  defp join(%JoinExpr{qual: qual, assoc: {ix, right}, on: on} = join, name, names) do
+    string = "#{name} in assoc(#{binding(names, ix)}, #{inspect right})"
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ maybe_on(on, names)
   end
 
-  defp join(%JoinExpr{qual: qual, source: {:fragment, _, _} = source, on: on, as: as} = part, name, names) do
+  defp join(%JoinExpr{qual: qual, source: {:fragment, _, _} = source, on: on} = join = part, name, names) do
     string = "#{name} in #{expr(source, names, part)}"
-    [{join_qual(qual), string}] ++ kw_inspect(:as, as) ++ [on: expr(on, names)]
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ [on: expr(on, names)]
   end
 
-  defp join(%JoinExpr{qual: qual, source: source, on: on, as: as}, name, names) do
+  defp join(%JoinExpr{qual: qual, source: source, on: on} = join, name, names) do
     string = "#{name} in #{inspect_source source}"
-    [{join_qual(qual), string}] ++ kw_inspect(:as, as) ++ [on: expr(on, names)]
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ [on: expr(on, names)]
   end
 
   defp maybe_on(%QueryExpr{expr: true}, _names), do: []
@@ -136,6 +137,10 @@ defimpl Inspect, for: Ecto.Query do
   defp kw_inspect(_key, nil), do: []
   defp kw_inspect(key, val),  do: [{key, inspect(val)}]
 
+  defp kw_as_and_prefix(%{as: as, prefix: prefix}) do
+    kw_inspect(:as, as) ++ kw_inspect(:prefix, prefix)
+  end
+
   defp expr(%{expr: expr} = part, names) do
     expr(expr, names, part)
   end
@@ -156,18 +161,14 @@ defimpl Inspect, for: Ecto.Query do
       %{^ix => {:any, fields}} when ix == 0 ->
         Kernel.inspect(fields)
       %{^ix => {tag, fields}} ->
-        "#{tag}(" <> elem(names, ix) <> ", " <> Kernel.inspect(fields) <> ")"
+        "#{tag}(" <> binding(names, ix) <> ", " <> Kernel.inspect(fields) <> ")"
       _ ->
-        elem(names, ix)
+        binding(names, ix)
     end
   end
 
   defp expr_to_string({:&, _, [ix]}, _, names, _) do
-    try do
-      elem(names, ix)
-    rescue
-      ArgumentError -> "unknown_binding!"
-    end
+    binding(names, ix)
   end
 
   # Inject the interpolated value
@@ -289,6 +290,14 @@ defimpl Inspect, for: Ecto.Query do
 
   defp generate_names([], acc, _found) do
     acc
+  end
+
+  defp binding(names, pos) do
+    try do
+      elem(names, pos)
+    rescue
+      ArgumentError -> "unknown_binding_#{pos}!"
+    end
   end
 
   defp normalize_source("Elixir." <> _ = source),

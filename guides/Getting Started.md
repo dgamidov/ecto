@@ -26,8 +26,10 @@ To add Ecto to this application, there are a few steps that we need to take. The
 
 ```elixir
 defp deps do
-  [{:ecto, "~> 2.0"},
-   {:postgrex, "~> 0.11"}]
+  [
+    {:ecto_sql, "~> 3.0"},
+    {:postgrex, ">= 0.0.0"}
+  ]
 end
 ```
 
@@ -58,7 +60,6 @@ This command will generate the configuration required to connect to a database. 
 
 ```elixir
 config :friends, Friends.Repo,
-  adapter: Ecto.Adapters.Postgres,
   database: "friends_repo",
   username: "user",
   password: "pass",
@@ -76,30 +77,18 @@ The `Friends.Repo` module is defined in `lib/friends/repo.ex` by our `mix ecto.g
 
 ```elixir
 defmodule Friends.Repo do
-  use Ecto.Repo, otp_app: :friends
+  use Ecto.Repo,
+    otp_app: :friends,
+    adapter: Ecto.Adapters.Postgres
 end
 ```
 
-This module is what we'll be using to query our database shortly. It uses the `Ecto.Repo` module, and the `otp_app` tells Ecto which Elixir application it can look for database configuration in. In this case, we've specified that it is the `:friends` application where Ecto can find that configuration and so Ecto will use the configuration that was set up in `config/config.exs`.
+This module is what we'll be using to query our database shortly. It uses the `Ecto.Repo` module, and the `otp_app` tells Ecto which Elixir application it can look for database configuration in. In this case, we've specified that it is the `:friends` application where Ecto can find that configuration and so Ecto will use the configuration that was set up in `config/config.exs`. Finally, we configure the database `:adapter` to Postgres.
 
-The final piece of configuration is to setup the `Friends.Repo` as a supervisor within the application's supervision tree, which we can do in `lib/friends/application.ex` (or `lib/friends.ex` for elixir versions `< 1.4.0`), inside the `start/2` function:
+The final piece of configuration is to setup the `Friends.Repo` as a supervisor within the application's supervision tree, which we can do in `lib/friends/application.ex`, inside the `start/2` function:
 
-`Elixir < 1.5.0`:
 ```elixir
 def start(_type, _args) do
-  import Supervisor.Spec
-
-  children = [
-    supervisor(Friends.Repo, []),
-  ]
-
-  ...
-```
-
-`Elixir >= 1.5.0`:
-```elixir
-def start(_type, _args) do
-
   children = [
     Friends.Repo,
   ]
@@ -121,7 +110,7 @@ We've now configured our application so that it's able to make queries to our da
 
 ## Test Environment Setup
 
-The test environment setup is described [here](Testing%20with%20Ecto.md).
+The test environment setup is described [here](testing-with-ecto.html).
 
 ## Setting up the database
 

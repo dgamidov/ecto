@@ -219,23 +219,31 @@ defmodule Ecto.Adapters.SQL.Sandbox do
 
       09:56:43.081 [error] Postgrex.Protocol (#PID<>) disconnected:
           ** (DBConnection.ConnectionError) owner #PID<> timed out
-          because it owned the connection for longer than 15000ms
+          because it owned the connection for longer than 60000ms
 
-  If you have a long running test (or you're debugging with IEx.pry), the timeout for the connection ownership may
-  be too short.  You can increase the timeout by setting the
-  `:ownership_timeout` options for your repo config in `config/config.exs` (or preferably in `config/test.exs`):
+  If you have a long running test (or you're debugging with IEx.pry),
+  the timeout for the connection ownership may be too short.  You can
+  increase the timeout by setting the `:ownership_timeout` options for
+  your repo config in `config/config.exs` (or preferably in `config/test.exs`):
 
       config :my_app, MyApp.Repo,
         ownership_timeout: NEW_TIMEOUT_IN_MILLISECONDS
 
   The `:ownership_timeout` option is part of
   [`DBConnection.Ownership`](https://hexdocs.pm/db_connection/DBConnection.Ownership.html)
-  and defaults to 15000ms. Timeouts are given as integers in milliseconds.
+  and defaults to 60000ms. Timeouts are given as integers in milliseconds.
 
   Alternately, if this is an issue for only a handful of long-running tests,
   you can pass an `:ownership_timeout` option when calling
   `Ecto.Adapters.SQL.Sandbox.checkout/2` instead of setting a longer timeout
   globally in your config.
+
+  ### Deferred triggers
+
+  Deferred triggers are triggers that are deferred until the transaction
+  terminates. Since the SQL Sandbox runs the whole test inside a transaction
+  and emulates transaction calls with savepoints, deferred triggers do not
+  work with the SQL sandbox.
 
   ### Database locks and deadlocks
 
@@ -286,6 +294,12 @@ defmodule Ecto.Adapters.SQL.Sandbox do
         System.unique_integer [:positive]
       end
 
+  In fact, avoiding unique emails like above can also have a positive
+  impact on the test suite performance, as it reduces contention and
+  wait between concurrent tests. We have heard reports where using
+  dynamic values for uniquely indexed columns, as we did for e-mail
+  above, made a test suite run between 2x to 3x faster.
+
   Deadlocks may happen in other circumstances. If you believe you
   are hitting a scenario that has not been described here, please
   report an issue so we can improve our examples. As a last resort,
@@ -300,6 +314,10 @@ defmodule Ecto.Adapters.SQL.Sandbox do
     end
 
     def connect(_opts) do
+      raise "should never be invoked"
+    end
+
+    def handle_status(_opts, _state) do
       raise "should never be invoked"
     end
 
@@ -325,7 +343,7 @@ defmodule Ecto.Adapters.SQL.Sandbox do
       opts = [mode: :savepoint] ++ opts
       proxy(:handle_commit, {conn_mod, state, false}, [opts])
     end
-    def handle_rollback(opts, {conn_mod, state, true}) do
+    def handle_rollback(opts, {conn_mod, state, _}) do
       opts = [mode: :savepoint] ++ opts
       proxy(:handle_rollback, {conn_mod, state, false}, [opts])
     end
@@ -338,14 +356,10 @@ defmodule Ecto.Adapters.SQL.Sandbox do
       do: proxy(:handle_close, state, [query, maybe_savepoint(opts, state)])
     def handle_declare(query, params, opts, state),
       do: proxy(:handle_declare, state, [query, params, maybe_savepoint(opts, state)])
-    def handle_first(query, cursor, opts, state),
-      do: proxy(:handle_first, state, [query, cursor, maybe_savepoint(opts, state)])
-    def handle_next(query, cursor, opts, state),
-      do: proxy(:handle_next, state, [query, cursor, maybe_savepoint(opts, state)])
+    def handle_fetch(query, cursor, opts, state),
+      do: proxy(:handle_fetch, state, [query, cursor, maybe_savepoint(opts, state)])
     def handle_deallocate(query, cursor, opts, state),
       do: proxy(:handle_deallocate, state, [query, cursor, maybe_savepoint(opts, state)])
-    def handle_info(msg, state),
-      do: proxy(:handle_info, state, [msg])
 
     defp maybe_savepoint(opts, {_, _, in_transaction?}) do
       if not in_transaction? and Keyword.get(opts, :sandbox_subtransaction, true) do
@@ -362,78 +376,16 @@ defmodule Ecto.Adapters.SQL.Sandbox do
     end
   end
 
-  defmodule Pool do
-    @moduledoc false
-    if Code.ensure_loaded?(DBConnection) do
-      @behaviour DBConnection.Pool
-    end
-
-    def ensure_all_started(_opts, _type) do
-      raise "should never be invoked"
-    end
-
-    def start_link(_module, _opts) do
-      raise "should never be invoked"
-    end
-
-    def child_spec(_module, _opts, _child_opts) do
-      raise "should never be invoked"
-    end
-
-    def checkout(pool, opts) do
-      pool_mod = opts[:sandbox_pool]
-
-      case pool_mod.checkout(pool, opts) do
-        {:ok, pool_ref, conn_mod, conn_state} ->
-          case conn_mod.handle_begin([mode: :transaction] ++ opts, conn_state) do
-            {:ok, _, conn_state} ->
-              {:ok, pool_ref, Connection, {conn_mod, conn_state, false}}
-            {_error_or_disconnect, err, conn_state} ->
-              pool_mod.disconnect(pool_ref, err, conn_state, opts)
-          end
-        error ->
-          error
-      end
-    end
-
-    def checkin(pool_ref, {conn_mod, conn_state, _in_transaction?}, opts) do
-      pool_mod = opts[:sandbox_pool]
-      case conn_mod.handle_rollback([mode: :transaction] ++ opts, conn_state) do
-        {:ok, _, conn_state} ->
-          pool_mod.checkin(pool_ref, conn_state, opts)
-        {_error_or_disconnect, err, conn_state} ->
-          pool_mod.disconnect(pool_ref, err, conn_state, opts)
-      end
-    end
-
-    def disconnect(owner, exception, {_conn_mod, conn_state, _in_transaction?}, opts) do
-      opts[:sandbox_pool].disconnect(owner, exception, conn_state, opts)
-    end
-
-    def stop(owner, reason, {_conn_mod, conn_state, _in_transaction?}, opts) do
-      opts[:sandbox_pool].stop(owner, reason, conn_state, opts)
-    end
-  end
-
   @doc """
   Sets the mode for the `repo` pool.
 
   The mode can be `:auto`, `:manual` or `{:shared, <pid>}`.
   """
   def mode(repo, mode)
-      when mode in [:auto, :manual]
-      when elem(mode, 0) == :shared and is_pid(elem(mode, 1)) do
-    {_repo_mod, _sql, name, opts} = proxy_pool(repo)
-
-    # If the mode is set to anything but shared, let's
-    # automatically checkin the current connection to
-    # force it to act according to the chosen mode.
-    # TODO: This is may no longer be necessary on latest DBConnection
-    if mode in [:auto, :manual] do
-      checkin(repo, [])
-    end
-
-    DBConnection.Ownership.ownership_mode(name, mode, opts)
+      when is_atom(repo) and mode in [:auto, :manual]
+      when is_atom(repo) and elem(mode, 0) == :shared and is_pid(elem(mode, 1)) do
+    %{pid: pool, opts: opts} = proxy_pool(repo)
+    DBConnection.Ownership.ownership_mode(pool, mode, opts)
   end
 
   @doc """
@@ -448,30 +400,35 @@ defmodule Ecto.Adapters.SQL.Sandbox do
     * `:sandbox` - when true the connection is wrapped in
       a transaction. Defaults to true.
 
-    * `:isolation` - set the query to the given isolation level
+    * `:isolation` - set the query to the given isolation level.
 
     * `:ownership_timeout` - limits how long the connection can be
-      owned. Defaults to the compiled value from your repo config in
+      owned. Defaults to the value in your repo config in
       `config/config.exs` (or preferably in `config/test.exs`), or
-      15000 ms if not set.
+      60000 ms if not set. The timeout exists for sanity checking
+      purposes, to ensure there is no connection leakage, and can
+      be bumped whenever necessary.
+
   """
-  def checkout(repo, opts \\ []) do
-    {_repo_mod, _sql, name, pool_opts} =
+  def checkout(repo, opts \\ []) when is_atom(repo) do
+    %{pid: pool, opts: pool_opts} =
       if Keyword.get(opts, :sandbox, true) do
         proxy_pool(repo)
       else
-        Ecto.Registry.lookup(repo)
+        Ecto.Adapter.lookup_meta(repo)
       end
 
     pool_opts_overrides = Keyword.take(opts, [:ownership_timeout])
     pool_opts = Keyword.merge(pool_opts, pool_opts_overrides)
 
-    case DBConnection.Ownership.ownership_checkout(name, pool_opts) do
+    case DBConnection.Ownership.ownership_checkout(pool, pool_opts) do
       :ok ->
         if isolation = opts[:isolation] do
           set_transaction_isolation_level(repo, isolation)
         end
+
         :ok
+
       other ->
         other
     end
@@ -479,9 +436,11 @@ defmodule Ecto.Adapters.SQL.Sandbox do
 
   defp set_transaction_isolation_level(repo, isolation) do
     query = "SET TRANSACTION ISOLATION LEVEL #{isolation}"
+
     case Ecto.Adapters.SQL.query(repo, query, [], sandbox_subtransaction: false) do
       {:ok, _} ->
         :ok
+
       {:error, error} ->
         checkin(repo, [])
         raise error
@@ -491,25 +450,26 @@ defmodule Ecto.Adapters.SQL.Sandbox do
   @doc """
   Checks in the connection back into the sandbox pool.
   """
-  def checkin(repo, _opts \\ []) do
-    {_repo_mod, _sql, name, opts} = Ecto.Registry.lookup(repo)
-    DBConnection.Ownership.ownership_checkin(name, opts)
+  def checkin(repo, _opts \\ []) when is_atom(repo) do
+    %{pid: pool, opts: opts} = Ecto.Adapter.lookup_meta(repo)
+    DBConnection.Ownership.ownership_checkin(pool, opts)
   end
 
   @doc """
   Allows the `allow` process to use the same connection as `parent`.
   """
-  def allow(repo, parent, allow, _opts \\ []) do
-    {_repo_mod, _sql, name, opts} = Ecto.Registry.lookup(repo)
-    DBConnection.Ownership.ownership_allow(name, parent, allow, opts)
+  def allow(repo, parent, allow, _opts \\ []) when is_atom(repo) do
+    %{pid: pool, opts: opts} = Ecto.Adapter.lookup_meta(repo)
+    DBConnection.Ownership.ownership_allow(pool, parent, allow, opts)
   end
 
   @doc """
   Runs a function outside of the sandbox.
   """
-  def unboxed_run(repo, fun) do
+  def unboxed_run(repo, fun) when is_atom(repo) do
     checkin(repo)
     checkout(repo, sandbox: false)
+
     try do
       fun.()
     after
@@ -518,7 +478,7 @@ defmodule Ecto.Adapters.SQL.Sandbox do
   end
 
   defp proxy_pool(repo) do
-    {repo_mod, sql, name, opts} = Ecto.Registry.lookup(repo)
+    %{opts: opts} = adapter_meta = Ecto.Adapter.lookup_meta(repo)
 
     if opts[:pool] != DBConnection.Ownership do
       raise """
@@ -529,7 +489,35 @@ defmodule Ecto.Adapters.SQL.Sandbox do
       """
     end
 
-    {pool, opts} = Keyword.pop(opts, :ownership_pool, DBConnection.Poolboy)
-    {repo_mod, sql, name, [repo: repo, sandbox_pool: pool, ownership_pool: Pool] ++ opts}
+    callbacks = [
+      post_checkout: &post_checkout(&1, &2, opts),
+      pre_checkin: &pre_checkin(&1, &2, &3, opts)
+    ]
+
+    %{adapter_meta | opts: callbacks ++ opts}
+  end
+
+  defp post_checkout(conn_mod, conn_state, opts) do
+    case conn_mod.handle_begin([mode: :transaction] ++ opts, conn_state) do
+      {:ok, _, conn_state} ->
+        {:ok, Connection, {conn_mod, conn_state, false}}
+
+      {_error_or_disconnect, err, conn_state} ->
+        {:disconnect, err, conn_mod, conn_state}
+    end
+  end
+
+  defp pre_checkin(:checkin, Connection, {conn_mod, conn_state, _in_transaction?}, opts) do
+    case conn_mod.handle_rollback([mode: :transaction] ++ opts, conn_state) do
+      {:ok, _, conn_state} ->
+        {:ok, conn_mod, conn_state}
+
+      {_error_or_disconnect, err, conn_state} ->
+        {:disconnect, err, conn_mod, conn_state}
+    end
+  end
+
+  defp pre_checkin(_, Connection, {conn_mod, conn_state, _in_transaction?}, _opts) do
+    {:ok, conn_mod, conn_state}
   end
 end

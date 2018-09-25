@@ -47,8 +47,7 @@ defmodule Ecto.QueryTest do
     end
 
     test "does not allow nils in comparison at runtime" do
-      assert_raise ArgumentError,
-                   ~r"comparison with nil is forbidden as it is unsafe", fn ->
+      assert_raise ArgumentError, ~r"comparison with nil is forbidden as it is unsafe", fn ->
         Post |> where([p], p.title == ^nil)
       end
     end
@@ -261,7 +260,7 @@ defmodule Ecto.QueryTest do
     end
 
     test "crashes on duplicate as for keyword query" do
-      message = ~r"`as` keyword was given more than once to the same join"
+      message = ~r"`as` keyword was given more than once"
       assert_raise Ecto.Query.CompileError, message, fn ->
         quote_and_eval(from(p in "posts", join: b in "blogs", as: :foo, as: :bar))
       end
@@ -291,7 +290,7 @@ defmodule Ecto.QueryTest do
     end
 
     test "crashes on assigning the name to source when it already has one" do
-      message = ~r"can't apply alias `:foo` - source binding has `:post` alias already"
+      message = ~r"can't apply alias `:foo`, binding in `from` is already aliased to `:post`"
       assert_raise Ecto.Query.CompileError, message, fn ->
         query = from p in "posts", as: :post
         from(p in query, as: :foo)
@@ -349,11 +348,71 @@ defmodule Ecto.QueryTest do
 
     test "dynamic in :on takes new binding when alias is used" do
       join_on = dynamic([p, comment: c], c.text == "Test Comment")
-
       query = from p in "posts", join: c in "comments", as: :comment, on: ^join_on
 
       assert inspect(query) ==
         ~s[#Ecto.Query<from p in \"posts\", join: c in \"comments\", as: :comment, on: c.text == \"Test Comment\">]
+    end
+  end
+
+  describe "prefixes" do
+    test "are supported on from and join" do
+      query = from "posts", prefix: "hello", join: "comments", prefix: "world"
+      assert query.from.prefix == "hello"
+      assert hd(query.joins).prefix == "world"
+    end
+
+    test "are supported on dynamic from" do
+      posts = "posts"
+      query = from posts, prefix: "hello"
+      assert query.from.prefix == "hello"
+    end
+
+    test "raises when conflicting with dynamic from" do
+      posts = from "posts", prefix: "hello"
+
+      message = "can't apply prefix `\"world\"`, `from` is already prefixed to `\"hello\"`"
+      assert_raise Ecto.Query.CompileError, message, fn ->
+        from posts, prefix: "world"
+      end
+    end
+
+    test "are expected to be compile-time strings" do
+      assert_raise Ecto.Query.CompileError, ~r"`prefix` must be a compile time string", fn ->
+        quote_and_eval(from "posts", prefix: 123)
+      end
+
+      assert_raise Ecto.Query.CompileError, ~r"`prefix` must be a compile time string", fn ->
+        quote_and_eval(from "posts", join: "comments", prefix: 123)
+      end
+    end
+  end
+
+  describe "hints" do
+    test "are supported on from and join" do
+      query = from "posts", hints: "hello", join: "comments", hints: ["world", "extra"]
+      assert query.from.hints == ["hello"]
+      assert hd(query.joins).hints == ["world", "extra"]
+    end
+
+    test "are supported on dynamic from" do
+      posts = "posts"
+      query = from posts, hints: "hello"
+      assert query.from.hints == ["hello"]
+
+      posts = from "posts", hints: "hello"
+      query = from posts, hints: "world"
+      assert query.from.hints == ["hello", "world"]
+    end
+
+    test "are expected to be compile-time strings or list of strings" do
+      assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
+        quote_and_eval(from "posts", hints: 123)
+      end
+
+      assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
+        quote_and_eval(from "posts", join: "comments", hints: 123)
+      end
     end
   end
 
@@ -399,7 +458,6 @@ defmodule Ecto.QueryTest do
 
     test "are built at compile time even with joins" do
       from(c in "comments", join: p in "posts", on: c.text == "", select: c)
-      from(c in "comments", join: p in {"user_posts", Post}, on: c.text == "", select: c)
       from(p in "posts", join: c in assoc(p, :comments), select: p)
 
       message = ~r"`on` keyword must immediately follow a join"
@@ -577,7 +635,7 @@ defmodule Ecto.QueryTest do
 
     test "raises at runtime when interpolation is not a string" do
       assert_raise ArgumentError, ~r"unsafe_fragment\(...\) expects the first argument", fn ->
-        clause = ["foo": "bar"]
+        clause = [foo: "bar"]
         from p in "posts", where: unsafe_fragment(^clause)
       end
     end

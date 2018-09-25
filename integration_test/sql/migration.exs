@@ -71,6 +71,37 @@ defmodule Ecto.Integration.MigrationTest do
     end
   end
 
+  defmodule AlterColumnFromMigration do
+    use Ecto.Migration
+
+    def change do
+      create table(:modify_from_authors, primary_key: false) do
+        add :id, :integer, primary_key: true
+      end
+      create table(:modify_from_posts) do
+        add :author_id, references(:modify_from_authors, type: :integer)
+      end
+
+      if direction() == :up do
+        flush()
+        PoolRepo.insert_all "modify_from_authors", [[id: 1]]
+        PoolRepo.insert_all "modify_from_posts", [[author_id: 1]]
+      end
+
+      alter table(:modify_from_posts) do
+        # remove the constraints modify_from_posts_author_id_fkey
+        modify :author_id, :integer, from: references(:modify_from_authors, type: :integer)
+      end
+      alter table(:modify_from_authors) do
+        modify :id, :bigint, from: :integer
+      end
+      alter table(:modify_from_posts) do
+        # add the constraints modify_from_posts_author_id_fkey
+        modify :author_id, references(:modify_from_authors, type: :bigint), from: :integer
+      end
+    end
+  end
+
   defmodule AlterForeignKeyOnDeleteMigration do
     use Ecto.Migration
 
@@ -303,6 +334,11 @@ defmodule Ecto.Integration.MigrationTest do
   import Ecto.Query, only: [from: 2]
   import Ecto.Migrator, only: [up: 4, down: 4]
 
+  setup do
+    PoolRepo.delete_all(Ecto.Migration.SchemaMigration)
+    :ok
+  end
+
   test "create and drop table and indexes" do
     assert :ok == up(PoolRepo, 20050906120000, CreateMigration, log: false)
     assert :ok == down(PoolRepo, 20050906120000, CreateMigration, log: false)
@@ -335,17 +371,17 @@ defmodule Ecto.Integration.MigrationTest do
   end
 
   test "rolls back references in change/1" do
-    assert :ok == up(PoolRepo, 19850423000000, ReferencesRollbackMigration, log: false)
-    assert :ok == down(PoolRepo, 19850423000000, ReferencesRollbackMigration, log: false)
+    assert :ok == up(PoolRepo, 20050906120000, ReferencesRollbackMigration, log: false)
+    assert :ok == down(PoolRepo, 20050906120000, ReferencesRollbackMigration, log: false)
   end
 
   test "create table if not exists and drop table if exists does not raise on failure" do
-    assert :ok == up(PoolRepo, 19850423000001, NoErrorTableMigration, log: false)
+    assert :ok == up(PoolRepo, 20050906120000, NoErrorTableMigration, log: false)
   end
 
   @tag :create_index_if_not_exists
   test "create index if not exists and drop index if exists does not raise on failure" do
-    assert :ok == up(PoolRepo, 19850423000002, NoErrorIndexMigration, log: false)
+    assert :ok == up(PoolRepo, 20050906120000, NoErrorIndexMigration, log: false)
   end
 
   test "raises on NoSQL migrations" do
@@ -378,6 +414,16 @@ defmodule Ecto.Integration.MigrationTest do
     assert catch_error(PoolRepo.query!(query))
 
     :ok = down(PoolRepo, 20080906120000, AlterColumnMigration, log: false)
+  end
+
+  @tag :modify_column_with_from
+  test "modify column with from" do
+    assert :ok == up(PoolRepo, 20180918120000, AlterColumnFromMigration, log: false)
+
+    assert [1] ==
+           PoolRepo.all from p in "modify_from_posts", select: p.author_id
+
+    :ok = down(PoolRepo, 20180918120000, AlterColumnFromMigration, log: false)
   end
 
   @tag :modify_foreign_key_on_delete

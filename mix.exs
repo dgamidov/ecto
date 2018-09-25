@@ -32,7 +32,7 @@ defmodule Ecto.MixProject do
 
   def application do
     [
-      applications: [:logger, :decimal, :poolboy, :crypto],
+      extra_applications: [:logger, :crypto],
       env: [postgres_map_type: "jsonb"],
       mod: {Ecto.Application, []}
     ]
@@ -40,16 +40,14 @@ defmodule Ecto.MixProject do
 
   defp deps do
     [
-      {:poolboy, "~> 1.5"},
       {:decimal, "~> 1.5"},
 
       # Drivers
-      {:db_connection, "~> 1.1", optional: true},
-      {:postgrex, "~> 0.14.0-dev", optional: true, github: "elixir-ecto/postgrex"},
-      {:mariaex, "~> 0.9.0-dev", optional: true, github: "xerions/mariaex"},
+      {:db_connection, "~> 2.0.0-dev", github: "elixir-ecto/db_connection", ref: "bb29b5c", override: true},
+      {:postgrex, "~> 0.14.0-dev", optional: true, github: "elixir-ecto/postgrex", ref: "2874de4"},
+      {:mariaex, "~> 0.9.0-dev", optional: true, github: "xerions/mariaex", ref: "eac3104"},
 
       # Optional
-      {:sbroker, "~> 1.0", optional: true},
       {:poison, "~> 2.2 or ~> 3.0", optional: true},
       {:jason, "~> 1.0", optional: true},
 
@@ -98,7 +96,8 @@ defmodule Ecto.MixProject do
       source_url: "https://github.com/elixir-ecto/ecto",
       extras: [
         "guides/Getting Started.md",
-        "guides/Associations.md"
+        "guides/Associations.md",
+        "guides/Testing with Ecto.md",
       ],
       groups_for_modules: [
         # Ecto,
@@ -110,6 +109,7 @@ defmodule Ecto.MixProject do
         # Ecto.Schema.Metadata,
         # Ecto.Type,
         # Ecto.UUID,
+        # Mix.Ecto,
 
         "Repo and Queries": [
           Ecto.LogEntry,
@@ -131,6 +131,8 @@ defmodule Ecto.MixProject do
         "Adapter specification": [
           Ecto.Adapter,
           Ecto.Adapter.Migration,
+          Ecto.Adapter.Queryable,
+          Ecto.Adapter.Schema,
           Ecto.Adapter.Storage,
           Ecto.Adapter.Structure,
           Ecto.Adapter.Transaction,

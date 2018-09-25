@@ -40,14 +40,15 @@ defmodule Ecto do
   repository as follows:
 
       defmodule Repo do
-        use Ecto.Repo, otp_app: :my_app
+        use Ecto.Repo,
+          otp_app: :my_app,
+          adapter: Ecto.Adapters.Postgres
       end
 
   Where the configuration for the Repo must be in your application
   environment, usually defined in your `config/config.exs`:
 
       config :my_app, Repo,
-        adapter: Ecto.Adapters.Postgres,
         database: "ecto_simple",
         username: "postgres",
         password: "postgres",
@@ -60,16 +61,13 @@ defmodule Ecto do
   but used as part of your application supervision tree.
 
   If your application was generated with a supervisor (by passing `--sup` to `mix new`)
-  you will have a `lib/my_app/application.ex` file (or `lib/my_app.ex` for Elixir versions `< 1.4.0`)
-  containing the application start callback that defines and starts your supervisor. 
-  You just need to edit the `start/2` function to start the repo as a supervisor on
-  your application's supervisor:
+  you will have a `lib/my_app/application.ex` file containing the application start
+  callback that defines and starts your supervisor.  You just need to edit the `start/2`
+  function to start the repo as a supervisor on your application's supervisor:
 
       def start(_type, _args) do
-        import Supervisor.Spec
-
         children = [
-          supervisor(Repo, [])
+          {MyApp.Repo, []}
         ]
 
         opts = [strategy: :one_for_one, name: MyApp.Supervisor]
@@ -274,6 +272,13 @@ defmodule Ecto do
 
   ## Other topics
 
+  ### Ecto and SQL
+
+  One of the most common ways to use Ecto is to interact with databases,
+  such as Postgres and MySQL via [`Ecto.Adapters.SQL`](http://hexdocs.pm/ecto_sql).
+  `Ecto.Adapters.SQL` provides many conveniences for working with SQL
+  databases, including support for database migrations.
+
   ### Associations
 
   Ecto supports defining associations on schemas:
@@ -378,24 +383,15 @@ defmodule Ecto do
   Ecto generators will automatically open the generated files if you have
   `ECTO_EDITOR` set in your environment variable.
 
-  #### Migrations
-
-  Ecto supports database migrations. You can generate a migration with:
-
-      $ mix ecto.gen.migration create_posts
-
-  This will create a new file inside `priv/repo/migrations` with the `change`
-  function. Check `Ecto.Migration` for more information.
-
   #### Repo resolution
 
-  Ecto requires developers to specify the key `:ecto_repos` in their application
-  configuration before using tasks like `ecto.create` and `ecto.migrate`. For example:
+  Ecto requires developers to specify the key `:ecto_repos` in their
+  application configuration before using tasks like `ecto.create` and
+  `ecto.migrate`. For example:
 
       config :my_app, :ecto_repos, [MyApp.Repo]
 
       config :my_app, MyApp.Repo,
-        adapter: Ecto.Adapters.Postgres,
         database: "ecto_simple",
         username: "postgres",
         password: "postgres",
@@ -419,7 +415,7 @@ defmodule Ecto do
   Raises `Ecto.NoPrimaryKeyFieldError` if the schema has no
   primary key field.
   """
-  @spec primary_key!(Ecto.Schema.t) :: Keyword.t | no_return
+  @spec primary_key!(Ecto.Schema.t) :: Keyword.t
   def primary_key!(%{__struct__: schema} = struct) do
     case primary_key(struct) do
       [] -> raise Ecto.NoPrimaryKeyFieldError, schema: schema

@@ -30,13 +30,13 @@ defmodule Ecto.Query.Builder do
   # var.x - where var is bound
   def escape({{:., _, [{var, _, context}, field]}, _, []}, _type, {params, acc}, vars, _env)
       when is_atom(var) and is_atom(context) and is_atom(field) do
-    {escape_field(var, field, vars), {params, acc}}
+    {escape_field!(var, field, vars), {params, acc}}
   end
 
   # field macro
   def escape({:field, _, [{var, _, context}, field]}, _type, {params, acc}, vars, _env)
       when is_atom(var) and is_atom(context) do
-    {escape_field(var, field, vars), {params, acc}}
+    {escape_field!(var, field, vars), {params, acc}}
   end
 
   # param interpolation
@@ -261,9 +261,15 @@ defmodule Ecto.Query.Builder do
     {expr, params_acc}
   end
 
+  def escape({:count, _, []}, _type, params_acc, _vars, _env) do
+    expr = {:{}, [], [:count, [], []]}
+    {expr, params_acc}
+  end
+
   def escape({:filter, _, [aggregate]}, type, params_acc, vars, env) do
     escape(aggregate, type, params_acc, vars, env)
   end
+
   def escape({:filter, _, [aggregate, filter_expr]}, type, params_acc, vars, env) do
     {aggregate, params_acc} = escape(aggregate, type, params_acc, vars, env)
     {filter_expr, params_acc} = escape(filter_expr, type, params_acc, vars, env)
@@ -324,15 +330,14 @@ defmodule Ecto.Query.Builder do
     end
   end
 
-  # Vars are not allowed
-  def escape({name, _, context} = var, _type, _params_acc, _vars, _env) when is_atom(name) and is_atom(context) do
-    error! "variable `#{Macro.to_string(var)}` is not a valid query expression. " <>
-           "If you wanted to inject a variable, you have to explicitly interpolate it " <>
-           "with ^. If you wanted to refer to a field, use the source.field syntax"
+  # Finally handle vars
+  def escape({var, _, context}, _type, params_acc, vars, _env) when is_atom(var) and is_atom(context) do
+    {escape_var!(var, vars), params_acc}
   end
 
   # Raise nice error messages for fun calls.
-  def escape({fun, _, args} = other, _type, _params_acc, _vars, _env) when is_atom(fun) and is_list(args) do
+  def escape({fun, _, args} = other, _type, _params_acc, _vars, _env)
+      when is_atom(fun) and is_list(args) do
     error! """
     `#{Macro.to_string(other)}` is not a valid query expression. \
     If you are trying to invoke a function that is not supported by Ecto, \
@@ -342,6 +347,19 @@ defmodule Ecto.Query.Builder do
 
     See Ecto.Query.API to learn more about the supported functions and \
     Ecto.Query.API.fragment/1 to learn more about fragments.
+    """
+  end
+
+  # Raise nice error message for remote calls
+  def escape({{:., _, [mod, fun]}, _, args} = other, _type, _params_acc, _vars, _env)
+      when is_atom(fun) do
+    fun_arity = "#{fun}/#{length(args)}"
+
+    error! """
+    `#{Macro.to_string(other)}` is not a valid query expression. \
+    If you want to invoke #{Macro.to_string(mod)}.#{fun_arity} in \
+    a query, make sure that the module #{Macro.to_string(mod)} \
+    is required and that #{fun_arity} is a macro
     """
   end
 
@@ -419,8 +437,8 @@ defmodule Ecto.Query.Builder do
     {expr, params}
   end
 
-  defp escape_field(var, field, vars) do
-    var   = escape_var(var, vars)
+  defp escape_field!(var, field, vars) do
+    var   = escape_var!(var, vars)
     field = quoted_field!(field)
     dot   = {:{}, [], [:., [], [var, field]]}
     {:{}, [], [dot, [], []]}
@@ -530,8 +548,8 @@ defmodule Ecto.Query.Builder do
   A escaped variable is represented internally as
   `&0`, `&1` and so on.
   """
-  @spec escape_var(atom, Keyword.t) :: Macro.t | no_return
-  def escape_var(var, vars) do
+  @spec escape_var!(atom, Keyword.t) :: Macro.t
+  def escape_var!(var, vars) do
     {:{}, [], [:&, [], [find_var!(var, vars)]]}
   end
 
@@ -681,7 +699,7 @@ defmodule Ecto.Query.Builder do
   Finds the index value for the given var in vars or raises.
   """
   def find_var!(var, vars) do
-    vars[var] || error! "unbound variable `#{var}` in query"
+    vars[var] || error! "unbound variable `#{var}` in query. If you are attempting to interpolate a value, use ^var"
   end
 
   @doc """
@@ -820,7 +838,8 @@ defmodule Ecto.Query.Builder do
   # Aggregates
   def quoted_type({:count, _, [_, _]}, _vars), do: :integer
   def quoted_type({:count, _, [_]}, _vars), do: :integer
-  def quoted_type({agg, _, [_]}, _vars) when agg in [:avg, :sum], do: :any # TODO: Support the number type
+  def quoted_type({:count, _, []}, _vars), do: :integer
+  def quoted_type({agg, _, [_]}, _vars) when agg in [:avg, :sum], do: :any
   def quoted_type({agg, _, [expr]}, vars) when agg in [:max, :min, :sum] do
     quoted_type(expr, vars)
   end

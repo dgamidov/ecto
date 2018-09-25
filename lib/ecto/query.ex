@@ -131,7 +131,7 @@ defmodule Ecto.Query do
   In any case, regardless if a schema has been given or not, Ecto
   queries are always composable thanks to its binding system.
 
-  ### Query bindings
+  ### Positional bindings
 
   On the left side of `in` we specify the query bindings.  This is
   done inside from and join clauses.  In the query below `u` is a
@@ -197,6 +197,8 @@ defmodule Ecto.Query do
 
   In other words, `...` will include all the binding between the
   first and the last, which may be no binding at all, one or many.
+
+  ### Named bindings
 
   Another option for flexibly building queries with joins are
   named bindings. Coming back to the previous example, provided
@@ -311,18 +313,43 @@ defmodule Ecto.Query do
   in the public schema, while MySQL queries are assumed to be in the
   database set in the config for the repo.
 
-  To set the prefix on a query:
+  The query prefix may be set either for the whole query or on each
+  individual `from` and `join` expression. If a `prefix` is not given
+  to a `from` or a `join`, the prefix of the schema given to the `from`
+  or `join` is used. The query prefix is used only if none of the above
+  are declared.
+
+  Let's see some examples. To see the query prefix globally, the simplest
+  mechanism is to pass an option to the repository operation:
+
+      results = Repo.all(query, prefix: "accounts")
+
+  You may also set the prefix for the whole query by setting the prefix field:
 
       results =
         query # May be User or an Ecto.Query itself
         |> Ecto.Queryable.to_query
-        |> Map.put(:prefix, "foo")
-        |> Repo.all
+        |> Map.put(:prefix, "accounts")
+        |> Repo.all()
 
-  When a prefix is set in a query, all loaded structs will belong to that
-  prefix, so operations like update and delete will be applied to the
-  proper prefix. In case you want to manually set the prefix for new data,
-  specially on insert, use `Ecto.put_meta/2`.
+  Setting the prefix in the query changes the default prefix of all `from`
+  and `join` expressions. You can override the query prefix by either setting
+  the `@schema_prefix` in your schema definitions or by passing the prefix
+  option:
+
+      from u in User,
+        prefix: "accounts",
+        join: p in assoc(u, :posts),
+        prefix: "public"
+
+  Overall, here is the prefix lookup precedence:
+
+    1. The `:prefix` option given to `from`/`join` has the highest precedence
+    2. Then it falls back to the `@schema_prefix` attribute declared in the schema
+      given to `from`/`join`
+    3. Then it falls back to the query prefix
+
+  The prefixes set in the query will be preserved when loading data.
   """
 
   defstruct [prefix: nil, sources: nil, from: nil, joins: [], aliases: %{}, wheres: [], select: nil,
@@ -331,7 +358,7 @@ defmodule Ecto.Query do
 
   defmodule FromExpr do
     @moduledoc false
-    defstruct [:source, :as]
+    defstruct [:source, :as, :prefix, hints: []]
   end
 
   defmodule DynamicExpr do
@@ -356,7 +383,7 @@ defmodule Ecto.Query do
 
   defmodule JoinExpr do
     @moduledoc false
-    defstruct [:qual, :source, :on, :file, :line, :assoc, :as, :ix, params: []]
+    defstruct [:qual, :source, :on, :file, :line, :assoc, :as, :ix, :prefix, params: [], hints: []]
   end
 
   defmodule Tagged do
@@ -614,14 +641,15 @@ defmodule Ecto.Query do
       raise ArgumentError, "second argument to `from` must be a compile time keyword list"
     end
 
-    {kw, as} = collect_as(kw)
-    {quoted, binds, count_bind} = From.build(expr, __CALLER__, as)
+    {kw, as, prefix, hints} = collect_as_and_prefix_and_hints(kw, nil, nil, nil)
+    {quoted, binds, count_bind} = From.build(expr, __CALLER__, as, prefix, hints)
     from(kw, __CALLER__, count_bind, quoted, to_query_binds(binds))
   end
 
-  @binds    [:where, :or_where, :select, :distinct, :order_by, :group_by,
-             :having, :or_having, :limit, :offset, :preload, :update, :select_merge]
+  @from_join_opts [:as, :prefix, :hints]
   @no_binds [:lock]
+  @binds [:where, :or_where, :select, :distinct, :order_by, :group_by] ++
+           [:having, :or_having, :limit, :offset, :preload, :update, :select_merge]
 
   defp from([{type, expr}|t], env, count_bind, quoted, binds) when type in @binds do
     # If all bindings are integer indexes keep AST Macro expandable to %Query{},
@@ -652,17 +680,20 @@ defmodule Ecto.Query do
 
   defp from([{join, expr}|t], env, count_bind, quoted, binds) when join in @joins do
     qual = join_qual(join)
-    {t, on, as} = collect_on_and_as(t, nil, nil)
-    {quoted, binds, count_bind} = Join.build(quoted, qual, binds, expr, count_bind, on, as, env)
-    from(t, env, count_bind, quoted, to_query_binds(binds))
-  end
+    {t, on, as, prefix, hints} = collect_on(t, nil, nil, nil, nil)
 
-  defp from([{:as, _value}|_], _env, _count_bind, _quoted, _binds) do
-    Builder.error! "`as` keyword must immediately follow a join"
+    {quoted, binds, count_bind} =
+      Join.build(quoted, qual, binds, expr, count_bind, on, as, prefix, hints, env)
+
+    from(t, env, count_bind, quoted, to_query_binds(binds))
   end
 
   defp from([{:on, _value}|_], _env, _count_bind, _quoted, _binds) do
     Builder.error! "`on` keyword must immediately follow a join"
+  end
+
+  defp from([{key, _value}|_], _env, _count_bind, _quoted, _binds) when key in @from_join_opts do
+    Builder.error! "`#{key}` keyword must immediately follow a from/join"
   end
 
   defp from([{key, _value}|_], _env, _count_bind, _quoted, _binds) do
@@ -686,19 +717,32 @@ defmodule Ecto.Query do
   defp join_qual(:left_lateral_join), do: :left_lateral
   defp join_qual(:inner_lateral_join), do: :inner_lateral
 
-  defp collect_on_and_as([{:on, on} | t], nil, as),
-    do: collect_on_and_as(t, on, as)
-  defp collect_on_and_as([{:on, expr} | t], on, as),
-    do: collect_on_and_as(t, {:and, [], [on, expr]}, as)
-  defp collect_on_and_as([{:as, as} | t], on, nil),
-    do: collect_on_and_as(t, on, as)
-  defp collect_on_and_as([{:as, _} | _], _, _),
-    do: Builder.error! "`as` keyword was given more than once to the same join"
-  defp collect_on_and_as(other, on, as),
-    do: {other, on, as}
+  defp collect_on([{key, _} | _] = t, on, as, prefix, hints) when key in @from_join_opts do
+    {t, as, prefix, hints} = collect_as_and_prefix_and_hints(t, as, prefix, hints)
+    collect_on(t, on, as, prefix, hints)
+  end
 
-  defp collect_as([{:as, as} | t]), do: {t, as}
-  defp collect_as(t), do: {t, nil}
+  defp collect_on([{:on, on} | t], nil, as, prefix, hints),
+    do: collect_on(t, on, as, prefix, hints)
+  defp collect_on([{:on, expr} | t], on, as, prefix, hints),
+    do: collect_on(t, {:and, [], [on, expr]}, as, prefix, hints)
+  defp collect_on(t, on, as, prefix, hints),
+    do: {t, on, as, prefix, hints}
+
+  defp collect_as_and_prefix_and_hints([{:as, as} | t], nil, prefix, hints),
+    do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+  defp collect_as_and_prefix_and_hints([{:as, _} | _], _, _, _),
+    do: Builder.error! "`as` keyword was given more than once to the same from/join"
+  defp collect_as_and_prefix_and_hints([{:prefix, prefix} | t], as, nil, hints),
+    do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+  defp collect_as_and_prefix_and_hints([{:prefix, _} | _], _, _, _),
+    do: Builder.error! "`prefix` keyword was given more than once to the same from/join"
+  defp collect_as_and_prefix_and_hints([{:hints, hints} | t], as, prefix, nil),
+    do: collect_as_and_prefix_and_hints(t, as, prefix, hints)
+  defp collect_as_and_prefix_and_hints([{:hints, _} | _], _, _, _),
+    do: Builder.error! "`hints` keyword was given more than once to the same from/join"
+  defp collect_as_and_prefix_and_hints(t, as, prefix, hints),
+    do: {t, as, prefix, hints}
 
   @doc """
   A join query expression.
@@ -714,18 +758,30 @@ defmodule Ecto.Query do
   Currently it is possible to join on:
 
     * an `Ecto.Schema`, such as `p in Post`
-    * an Ecto query with zero or more where clauses, such as `from "posts", where: [public: true]`
+    * an Ecto query with zero or more where clauses,
+      such as `from "posts", where: [public: true]`
     * an association, such as `c in assoc(post, :comments)`
-    * a query fragment, such as `c in fragment("SOME COMPLEX QUERY")`
     * a subquery, such as `c in subquery(another_query)`
+    * a query fragment, such as `c in fragment("SOME COMPLEX QUERY")`,
+      see "Joining with fragments" below.
 
-  The fragment support exists mostly for handling lateral joins.
-  See "Joining with fragments" below.
+  ## Options
+
+  Each join accepts the following options:
+
+    * `:on` - a query expression or keyword list to filter the join
+    * `:as` - a named binding for the join
+    * `:prefix` - the prefix to be used for the join when issuing a database query
+
+  In the keyword query syntax, those options must be given immediately
+  after the join. In the expression syntax, the options are given as
+  the fifth argument.
 
   ## Keywords examples
 
       from c in Comment,
-        join: p in Post, on: p.id == c.post_id,
+        join: p in Post,
+        on: p.id == c.post_id,
         select: {p.title, c.text}
 
       from p in Post,
@@ -735,7 +791,8 @@ defmodule Ecto.Query do
   Keywords can also be given or interpolated as part of `on`:
 
       from c in Comment,
-        join: p in Post, on: [id: c.post_id],
+        join: p in Post,
+        on: [id: c.post_id],
         select: {p.title, c.text}
 
   Any key in `on` will apply to the currently joined expression.
@@ -745,7 +802,8 @@ defmodule Ecto.Query do
 
       posts = Post
       from c in Comment,
-        join: p in ^posts, on: [id: c.post_id],
+        join: p in ^posts,
+        on: [id: c.post_id],
         select: {p.title, c.text}
 
   The above is specially useful to dynamically join on existing
@@ -796,39 +854,37 @@ defmodule Ecto.Query do
       |> select([g, gs], {g.name, gs.sold_on})
 
   """
+  @join_opts [:on | @from_join_opts]
+
   defmacro join(query, qual, binding \\ [], expr, opts \\ []) do
-    {on, as} =
-      case parse_join_opts(opts) do
-        {:opts, opts} ->
-          {Keyword.get(opts, :on), Keyword.get(opts, :as)}
-        {:expr, on_expr} ->
-          IO.warn "Passing raw `on` expression as the last argument to Ecto.Query.join/5 is deprecated. " <>
-            "Please use :on keyword option instead."
-          {on_expr, nil}
-      end
+    {t, on, as, prefix, hints} = opts |> parse_join_opts() |> collect_on(nil, nil, nil, nil)
+
+    with [{key, _} | _] <- t do
+      raise ArgumentError, "invalid option `#{key}` passed to Ecto.Query.join/5, " <>
+                             "valid options are: #{inspect(@join_opts)}"
+    end
 
     query
-    |> Join.build(qual, binding, expr, nil, on, as, __CALLER__)
+    |> Join.build(qual, binding, expr, nil, on, as, prefix, hints, __CALLER__)
     |> elem(0)
   end
 
-  @join_opts [:on, :as]
-
-  defp parse_join_opts([]), do: {:opts, []}
+  defp parse_join_opts([]), do: []
   defp parse_join_opts(list) when is_list(list) do
-    opts = Keyword.take(list, @join_opts)
+    case Keyword.split(list, @join_opts) do
+      {opts, []} ->
+        opts
 
-    case {list, opts} do
-      {list, []} ->
-        {:expr, list}
-      {opts, opts} ->
-        {:opts, opts}
-      {list, _} ->
-        raise ArgumentError, "invalid options passed to Ecto.Query.join/5: " <>
-          "#{inspect(Keyword.keys(list) -- @join_opts)}. Valid options: #{inspect @join_opts}."
+      {[], expr} ->
+        IO.warn "Passing raw `on` expression as the last argument to Ecto.Query.join/5 is deprecated. " <>
+            "Please use :on keyword option instead."
+        [on: expr]
+
+      {_, _} ->
+        list
     end
   end
-  defp parse_join_opts(expr), do: {:expr, expr}
+  defp parse_join_opts(expr), do: [on: expr]
 
   @doc """
   A select query expression.
@@ -1058,9 +1114,20 @@ defmodule Ecto.Query do
 
   Orders the fields based on one or more fields. It accepts a single field
   or a list of fields. The default direction is ascending (`:asc`) and can be
-  customized in a keyword list as shown in the examples.
+  customized in a keyword list as one of the following:
 
-  There can be several order by expressions in a query and new expressions
+    * `:asc`
+    * `:asc_nulls_last`
+    * `:asc_nulls_first`
+    * `:desc`
+    * `:desc_nulls_last`
+    * `:desc_nulls_first`
+
+  The `*_nulls_first` and `*_nulls_last` variants are not supported by all
+  databases. While all databases default to ascending order, the choice of
+  "nulls first" or "nulls last" is specific to each database implementation.
+
+  `order_by` may be invoked or listed in a query many times. New expressions
   are always appended to the previous ones.
 
   `order_by` also accepts a list of atoms where each atom refers to a field in
@@ -1074,11 +1141,11 @@ defmodule Ecto.Query do
       from(c in City, order_by: [asc: c.name, desc: c.population])
 
       from(c in City, order_by: [:name, :population])
-      from(c in City, order_by: [asc: :name, desc: :population])
+      from(c in City, order_by: [asc: :name, desc_nulls_first: :population])
 
   A keyword list can also be interpolated:
 
-      values = [asc: :name, desc: :population]
+      values = [asc: :name, desc_nulls_first: :population]
       from(c in City, order_by: ^values)
 
   A fragment can also be used:
@@ -1306,19 +1373,21 @@ defmodule Ecto.Query do
   end
 
   @doc """
-  Preloads the associations into the given struct.
+  Preloads the associations into the result set.
 
-  Preloading allows developers to specify associations that are preloaded
-  into the struct. Consider this example:
+  Imagine you have an schema `Post` with a `has_many :comments`
+  association and you execute the following query:
 
       Repo.all from p in Post, preload: [:comments]
 
   The example above will fetch all posts from the database and then do
   a separate query returning all comments associated with the given posts.
+  The comments are then processed and associated to each returned `post`
+  under the `comments` field.
 
-  However, often times, you want posts and comments to be selected and
+  Often times, you may want posts and comments to be selected and
   filtered in the same query. For such cases, you can explicitly tell
-  the association to be preloaded into the struct:
+  an existing join to be preloaded into the result set:
 
       Repo.all from p in Post,
                  join: c in assoc(p, :comments),
@@ -1326,7 +1395,11 @@ defmodule Ecto.Query do
                  preload: [comments: c]
 
   In the example above, instead of issuing a separate query to fetch
-  comments, Ecto will fetch posts and comments in a single query.
+  comments, Ecto will fetch posts and comments in a single query and
+  then do a separate pass associating each comment to its parent post.
+  Therefore, instead of returning `number_of_posts * number_of_comments`
+  results, like a `join` would, it returns only posts with the `comments`
+  fields properly filled in.
 
   Nested associations can also be preloaded in both formats:
 
@@ -1338,14 +1411,6 @@ defmodule Ecto.Query do
                  join: l in assoc(c, :likes),
                  where: l.inserted_at > c.updated_at,
                  preload: [comments: {c, likes: l}]
-
-  Keep in mind neither format can be nested arbitrarily. For
-  example, the query below is invalid because we cannot preload
-  likes with the join association `c`.
-
-      Repo.all from p in Post,
-                 join: c in assoc(p, :comments),
-                 preload: [comments: {c, :likes}]
 
   ## Preload queries
 
@@ -1373,7 +1438,7 @@ defmodule Ecto.Query do
 
   Preload also allows functions to be given. In such cases, the function
   receives the IDs to be fetched and it must return the associated data.
-  This data will then be mapped and sorted by the relationship key:
+  Ecto then will map this data and sort it by the relationship key:
 
       comment_preloader = fn post_ids -> fetch_comments_by_post_ids(post_ids) end
       Repo.all from p in Post, preload: [comments: ^comment_preloader]
@@ -1392,7 +1457,11 @@ defmodule Ecto.Query do
   ## Expressions examples
 
       Post |> preload(:comments) |> select([p], p)
-      Post |> join(:left, [p], c in assoc(p, :comments)) |> preload([p, c], [:user, comments: c]) |> select([p], p)
+
+      Post
+      |> join(:left, [p], c in assoc(p, :comments))
+      |> preload([p, c], [:user, comments: c])
+      |> select([p], p)
 
   """
   defmacro preload(query, bindings \\ [], expr) do
@@ -1450,7 +1519,11 @@ defmodule Ecto.Query do
           %{order_by | expr:
               Enum.map(expr, fn
                 {:desc, ast} -> {:asc, ast}
+                {:desc_nulls_last, ast} -> {:asc_nulls_first, ast}
+                {:desc_nulls_first, ast} -> {:asc_nulls_last, ast}
                 {:asc, ast} -> {:desc, ast}
+                {:asc_nulls_last, ast} -> {:desc_nulls_first, ast}
+                {:asc_nulls_first, ast} -> {:desc_nulls_last, ast}
               end)}
         end
     end

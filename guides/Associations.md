@@ -1,6 +1,6 @@
 # Ecto Association Guide
 
-This guide assumes you worked through the [Getting Started guide](Getting%20Started.md) and want to learn more about associations.
+This guide assumes you worked through the [Getting Started guide](getting-started.html) and want to learn more about associations.
 
 If you want to see the code from this guide, you can view it [at
 ecto/examples/ecto_assoc on GitHub](https://github.com/elixir-lang/ecto/tree/master/examples/ecto_assoc).
@@ -26,8 +26,10 @@ Add `ecto` and `postgrex` as dependencies to `mix.exs`
 ```elixir
 # mix.exs
 defp deps do
-  [{:ecto, "~> 2.0"},
-   {:postgrex, "~> 0.11"}]
+  [
+    {:ecto_sql, "~> 3.0"},
+    {:postgrex, ">= 0.0.0"}
+  ]
 end
 ```
 
@@ -42,7 +44,6 @@ Make sure the config for the repo is set properly:
 ```elixir
 # config/config.exs
 config :ecto_assoc, EctoAssoc.Repo,
-  adapter: Ecto.Adapters.Postgres,
   database: "ecto_assoc_repo",
   username: "postgres",
   password: "postgres",
@@ -53,24 +54,9 @@ config :ecto_assoc, ecto_repos: [EctoAssoc.Repo]
 
 Add the repo as a supervisor within the application's supervision tree:
 
-`Elixir < 1.5.0`:
 ```elixir
 # lib/ecto_assoc/application.exs
 def start(_type, _args) do
-  import Supervisor.Spec
-
-  children = [
-    supervisor(EctoAssoc.Repo, []),
-  ]
-
-  ...
-```
-
-`Elixir >= 1.5.0`:
-```elixir
-# lib/ecto_assoc/application.exs
-def start(_type, _args) do
-
   children = [
     EctoAssoc.Repo,
   ]
@@ -477,6 +463,7 @@ end
 and the following schema:
 
 ```elixir
+# lib/ecto_assoc/tag.ex
 defmodule EctoAssoc.Tag do
   use Ecto.Schema
 
@@ -697,7 +684,9 @@ deleted, only updated, make sure that:
 ...
 ```
 
-You should carefully read the documentation for [`Ecto.Schema.many_to_many/3`](Ecto.Schema.html#many_to_many/3). It makes sense in this case that we want to delete relationships in the join table `posts_tags` when updating a post with new tags.  Here we want to drop the tag "clickbait" and just keep the tag "misc", so we really do want the relationship in the joining table to be removed.  To do that, change the definition of the `many_to_many/3` in the `Post` schema:
+You should carefully read the documentation for [`Ecto.Schema.many_to_many/3`](Ecto.Schema.html#many_to_many/3).
+
+From a pragmatic point of view, when we update a post with new tags, we most likely *do* intend to remove the old tags from the relationship in the joining table. To do that, change the definition of the `many_to_many/3` in the `Post` schema:
 
 ```elixir
 # lib/ecto_assoc/post.ex
@@ -713,7 +702,7 @@ defmodule EctoAssoc.Post do
 end
 ```
 
-On the other hand, it probably *doesn't* make much sense to be able to remove relationships from the other end.  That is, with just a tag, it is hard to decide if a post should be related to the tag or not.  So it makes sense that we should still raise an error if we try to change posts that are related to tags from the tag side of things.
+From the tags side of things, it makes sense to get an error for removing a relationship between a tag and a post. After all, with just the tag, it is hard to decide which posts should be related.
 
 With the `:on_replace` option changed, Ecto will compare the data you gave with the tags currently in the post and conclude the association between the post and the "clickbait" tag must be removed, as follows:
 

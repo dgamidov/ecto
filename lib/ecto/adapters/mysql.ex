@@ -2,30 +2,21 @@ defmodule Ecto.Adapters.MySQL do
   @moduledoc """
   Adapter module for MySQL.
 
-  It handles and pools the connections to the MySQL
-  database using `mariaex` and a connection pool,
-  such as `poolboy`.
+  It uses `mariaex` for communicating to the database.
+  Currently it supports old MySQL versions but upcoming
+  Ecto releases will require 5.7+.
 
   ## Options
 
   MySQL options split in different categories described
-  below. All options should be given via the repository
-  configuration. These options are also passed to the module
-  specified in the `:pool` option, so check that module's
-  documentation for more options.
-
-  ### Compile time options
-
-  Those options should be set in the config file and require
-  recompilation in order to make an effect.
-
-    * `:adapter` - The adapter name, in this case, `Ecto.Adapters.MySQL`
-    * `:pool` - The connection pool module, defaults to `DBConnection.Poolboy`
-    * `:pool_timeout` - The default timeout to use on pool calls, defaults to `5000`
-    * `:timeout` - The default timeout to use on queries, defaults to `15000`
+  below. All options can be given via the repository
+  configuration:
 
   ### Connection options
 
+    * `:pool` - The connection pool module, defaults to `DBConnection.ConnectionPool`
+    * `:pool_timeout` - The default timeout to use on pool calls, defaults to `5000`
+    * `:timeout` - The default timeout to use on queries, defaults to `15000`
     * `:hostname` - Server hostname
     * `:port` - Server port (default: 3306)
     * `:username` - Username
@@ -35,6 +26,10 @@ defmodule Ecto.Adapters.MySQL do
     * `:parameters` - Keyword list of connection parameters
     * `:connect_timeout` - The timeout for establishing new connections (default: 5000)
     * `:socket_options` - Specifies socket configuration
+    * `:cli_protocol` - The protocol used for the mysql client connection (default: tcp).
+      This option is only used for `mix ecto.load` and `mix ecto.dump`,
+      via the `mysql` command. For more information, please check
+      [MySQL docs](https://dev.mysql.com/doc/en/connecting.html)
 
   The `:socket_options` are particularly useful when configuring the size
   of both send and receive buffers. For example, when Ecto starts with a
@@ -108,9 +103,7 @@ defmodule Ecto.Adapters.MySQL do
   version.
 
   If your version of MySQL supports microsecond precision, you
-  will be able to utilize Ecto's usec types. The precision for a
-  usec type will default to 6 but can be explicitly declared by
-  using the `precision` option.
+  will be able to utilize Ecto's usec types.
   """
 
   # Inherit all behaviour from Ecto.Adapters.SQL
@@ -122,13 +115,15 @@ defmodule Ecto.Adapters.MySQL do
 
   ## Custom MySQL types
 
+  # TODO: Remove json encoding/decoding when maps are supported in the adapter
+
   @doc false
-  def loaders(:map, type),            do: [&json_decode/1, type]
-  def loaders({:map, _}, type),       do: [&json_decode/1, type]
-  def loaders(:boolean, type),        do: [&bool_decode/1, type]
-  def loaders(:float, type),          do: [&float_decode/1, type]
-  def loaders(:binary_id, type),      do: [Ecto.UUID, type]
   def loaders({:embed, _} = type, _), do: [&json_decode/1, &Ecto.Adapters.SQL.load_embed(type, &1)]
+  def loaders({:map, _}, type),       do: [&json_decode/1, &Ecto.Adapters.SQL.load_embed(type, &1)]
+  def loaders(:map, type),            do: [&json_decode/1, type]
+  def loaders(:float, type),          do: [&float_decode/1, type]
+  def loaders(:boolean, type),        do: [&bool_decode/1, type]
+  def loaders(:binary_id, type),      do: [Ecto.UUID, type]
   def loaders(_, type),               do: [type]
 
   defp bool_decode(<<0>>), do: {:ok, false}
@@ -164,6 +159,8 @@ defmodule Ecto.Adapters.MySQL do
         {:error, :already_up}
       {:error, error} ->
         {:error, Exception.message(error)}
+      {:exit, exit} ->
+        {:error, exit_to_exception(exit)}
     end
   end
 
@@ -182,8 +179,10 @@ defmodule Ecto.Adapters.MySQL do
         {:error, :already_down}
       {:error, %{mariadb: %{code: 1049}}} ->
         {:error, :already_down}
-      {:error, error} ->
-        {:error, Exception.message(error)}
+      {:exit, :killed} ->
+        {:error, :already_down}
+      {:exit, exit} ->
+        {:error, exit_to_exception(exit)}
     end
   end
 
@@ -193,16 +192,21 @@ defmodule Ecto.Adapters.MySQL do
   end
 
   @doc false
-  def insert(repo, %{source: source, prefix: prefix} = meta, params,
-             {_, query_params, _} = on_conflict, returning, opts) do
-    key = primary_key!(meta, returning)
+  def insert(adapter_meta, schema_meta, params, on_conflict, returning, opts) do
+    %{source: source, prefix: prefix} = schema_meta
+    {_, query_params, _} = on_conflict
+
+    key = primary_key!(schema_meta, returning)
     {fields, values} = :lists.unzip(params)
     sql = @conn.insert(prefix, source, fields, [fields], on_conflict, [])
-    case Ecto.Adapters.SQL.query(repo, sql, values ++ query_params, opts) do
+
+    case Ecto.Adapters.SQL.query(adapter_meta, sql, values ++ query_params, opts) do
       {:ok, %{num_rows: 1, last_insert_id: last_insert_id}} ->
         {:ok, last_insert_id(key, last_insert_id)}
+
       {:ok, %{num_rows: 2, last_insert_id: last_insert_id}} ->
         {:ok, last_insert_id(key, last_insert_id)}
+
       {:error, err} ->
         case @conn.to_constraints(err) do
           []          -> raise err
@@ -241,6 +245,7 @@ defmodule Ecto.Adapters.MySQL do
       {:ok, %{rows: rows}} -> {:ok, Enum.map(rows, &hd/1)}
       {:error, %{mariadb: %{code: 1146}}} -> {:ok, []}
       {:error, _} = error -> error
+      {:exit, exit} -> {:error, exit_to_exception(exit)}
     end
   end
 
@@ -284,16 +289,16 @@ defmodule Ecto.Adapters.MySQL do
 
     opts =
       opts
-      |> Keyword.drop([:name, :log])
-      |> Keyword.put(:pool, DBConnection.Connection)
+      |> Keyword.drop([:name, :log, :pool, :pool_size])
       |> Keyword.put(:backoff_type, :stop)
+      |> Keyword.put(:max_restarts, 0)
 
     {:ok, pid} = Task.Supervisor.start_link
 
     task = Task.Supervisor.async_nolink(pid, fn ->
       {:ok, conn} = Mariaex.start_link(opts)
 
-      value = Ecto.Adapters.MySQL.Connection.execute(conn, sql, [], opts)
+      value = Mariaex.query(conn, sql, [], opts)
       GenServer.stop(conn)
       value
     end)
@@ -305,15 +310,18 @@ defmodule Ecto.Adapters.MySQL do
         {:ok, result}
       {:ok, {:error, error}} ->
         {:error, error}
-      {:exit, {%{__struct__: struct} = error, _}}
-          when struct in [Mariaex.Error, DBConnection.Error] ->
-        {:error, error}
-      {:exit, reason}  ->
-        {:error, RuntimeError.exception(Exception.format_exit(reason))}
+      {:exit, exit} ->
+        {:exit, exit}
       nil ->
         {:error, RuntimeError.exception("command timed out")}
     end
   end
+
+  defp exit_to_exception({%{__struct__: struct} = error, _})
+       when struct in [Mariaex.Error, DBConnection.Error],
+       do: error
+
+  defp exit_to_exception(reason), do: RuntimeError.exception(Exception.format_exit(reason))
 
   defp run_with_cmd(cmd, opts, opt_args) do
     unless System.find_executable(cmd) do
@@ -328,9 +336,18 @@ defmodule Ecto.Adapters.MySQL do
         []
       end
 
-    host = opts[:hostname] || System.get_env("MYSQL_HOST") || "localhost"
-    port = opts[:port] || System.get_env("MYSQL_TCP_PORT") || "3306"
-    args = ["--user", opts[:username], "--host", host, "--port", to_string(port), "--protocol=tcp"] ++ opt_args
+    host     = opts[:hostname] || System.get_env("MYSQL_HOST") || "localhost"
+    port     = opts[:port] || System.get_env("MYSQL_TCP_PORT") || "3306"
+    protocol = opts[:cli_protocol] || System.get_env("MYSQL_CLI_PROTOCOL") || "tcp"
+
+    args =
+      [
+        "--user", opts[:username],
+        "--host", host,
+        "--port", to_string(port),
+        "--protocol", protocol
+      ] ++ opt_args
+
     System.cmd(cmd, args, env: env, stderr_to_stdout: true)
   end
 end

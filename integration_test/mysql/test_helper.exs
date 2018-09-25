@@ -21,23 +21,15 @@ Code.require_file "../support/repo.exs", __DIR__
 Code.require_file "../support/schemas.exs", __DIR__
 Code.require_file "../support/migration.exs", __DIR__
 
-pool =
-  case System.get_env("ECTO_POOL") || "poolboy" do
-    "poolboy" -> DBConnection.Poolboy
-    "sbroker" -> DBConnection.Sojourn
-  end
-
 # Pool repo for async, safe tests
 alias Ecto.Integration.TestRepo
 
 Application.put_env(:ecto, TestRepo,
-  adapter: Ecto.Adapters.MySQL,
   url: Application.get_env(:ecto, :mysql_test_url) <> "/ecto_test",
-  pool: Ecto.Adapters.SQL.Sandbox,
-  ownership_pool: pool)
+  pool: Ecto.Adapters.SQL.Sandbox)
 
 defmodule Ecto.Integration.TestRepo do
-  use Ecto.Integration.Repo, otp_app: :ecto
+  use Ecto.Integration.Repo, otp_app: :ecto, adapter: Ecto.Adapters.MySQL
 end
 
 # Pool repo for non-async tests
@@ -45,12 +37,11 @@ alias Ecto.Integration.PoolRepo
 
 Application.put_env(:ecto, PoolRepo,
   adapter: Ecto.Adapters.MySQL,
-  pool: pool,
   url: Application.get_env(:ecto, :mysql_test_url) <> "/ecto_test",
   pool_size: 10)
 
 defmodule Ecto.Integration.PoolRepo do
-  use Ecto.Integration.Repo, otp_app: :ecto
+  use Ecto.Integration.Repo, otp_app: :ecto, adapter: Ecto.Adapters.MySQL
 
   def create_prefix(prefix) do
     "create database #{prefix}"
@@ -69,7 +60,7 @@ defmodule Ecto.Integration.Case do
   end
 end
 
-{:ok, _} = Ecto.Adapters.MySQL.ensure_all_started(TestRepo, :temporary)
+{:ok, _} = Ecto.Adapters.MySQL.ensure_all_started(TestRepo.config(), :temporary)
 
 # Load up the repository, start it, and run migrations
 _   = Ecto.Adapters.MySQL.storage_down(TestRepo.config)

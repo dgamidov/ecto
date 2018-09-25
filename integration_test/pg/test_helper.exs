@@ -15,38 +15,28 @@ Code.require_file "../support/repo.exs", __DIR__
 Code.require_file "../support/schemas.exs", __DIR__
 Code.require_file "../support/migration.exs", __DIR__
 
-pool =
-  case System.get_env("ECTO_POOL") || "poolboy" do
-    "poolboy" -> DBConnection.Poolboy
-    "sbroker" -> DBConnection.Sojourn
-  end
-
 # Pool repo for async, safe tests
 alias Ecto.Integration.TestRepo
 
 Application.put_env(:ecto, TestRepo,
-  adapter: Ecto.Adapters.Postgres,
   url: Application.get_env(:ecto, :pg_test_url) <> "/ecto_test",
-  pool: Ecto.Adapters.SQL.Sandbox,
-  ownership_pool: pool)
+  pool: Ecto.Adapters.SQL.Sandbox)
 
 defmodule Ecto.Integration.TestRepo do
-  use Ecto.Integration.Repo, otp_app: :ecto
+  use Ecto.Integration.Repo, otp_app: :ecto, adapter: Ecto.Adapters.Postgres
 end
 
 # Pool repo for non-async tests
 alias Ecto.Integration.PoolRepo
 
 Application.put_env(:ecto, PoolRepo,
-  adapter: Ecto.Adapters.Postgres,
-  pool: pool,
   url: Application.get_env(:ecto, :pg_test_url) <> "/ecto_test",
   pool_size: 10,
   max_restarts: 20,
   max_seconds: 10)
 
 defmodule Ecto.Integration.PoolRepo do
-  use Ecto.Integration.Repo, otp_app: :ecto
+  use Ecto.Integration.Repo, otp_app: :ecto, adapter: Ecto.Adapters.Postgres
 
   def create_prefix(prefix) do
     "create schema #{prefix}"
@@ -65,7 +55,7 @@ defmodule Ecto.Integration.Case do
   end
 end
 
-{:ok, _} = Ecto.Adapters.Postgres.ensure_all_started(TestRepo, :temporary)
+{:ok, _} = Ecto.Adapters.Postgres.ensure_all_started(TestRepo.config(), :temporary)
 
 # Load up the repository, start it, and run migrations
 _   = Ecto.Adapters.Postgres.storage_down(TestRepo.config)
@@ -77,12 +67,13 @@ _   = Ecto.Adapters.Postgres.storage_down(TestRepo.config)
 %{rows: [[version]]} = TestRepo.query!("SHOW server_version", [])
 
 version =
-  case String.split(version, ".") do
-    [x, y] -> "#{x}.#{y}.0"
+  case Regex.named_captures(~r/(?<major>[0-9]*)(\.(?<minor>[0-9]*))?.*/, version) do
+    %{"major" => major, "minor" => minor} -> "#{major}.#{minor}.0"
+    %{"major" => major} -> "#{major}.0.0"
     _other -> version
   end
 
-if Version.match?(version, "~> 9.5") do
+if Version.match?(version, ">= 9.5.0") do
   ExUnit.configure(exclude: [:without_conflict_target])
 else
   Application.put_env(:ecto, :postgres_map_type, "json")

@@ -18,13 +18,13 @@ defmodule Ecto.Changeset do
 
   Changesets allow working with both kinds of data:
 
-    * internal to the application - for example programatically generated,
+    * internal to the application - for example programmatically generated,
       or coming from other subsystems. This use case is primarily covered
       by the `change/2` and `put_change/3` functions.
 
     * external to the application - for example data provided by the user in
-      a form that needs to be type-converted and properly validated. This use case
-      is primarily covered by the `cast/4` function.
+      a form that needs to be type-converted and properly validated. This
+      use case is primarily covered by the `cast/4` function.
 
   ## Validations and constraints
 
@@ -114,18 +114,28 @@ defmodule Ecto.Changeset do
   ## Associations, embeds and on replace
 
   Using changesets you can work with associations as well as with embedded
-  structs. Changesets provide a convenient way of working with associations
-  as whole values - for example considering the entire list of `has_many`
-  associations and not focusing just on a single one. Two main functions
-  that provide this functionality are `cast_assoc/3` for working with external
-  data, and `put_assoc/3` for working with internal data - the difference
-  between those two functions is analogical to the difference between
-  `cast/4` and `change/2`.
+  structs. There are two primary APIs:
 
-  Sometimes related data may be replaced by incoming data and by
-  default Ecto won't allow such. Such behaviour can be changed when defining
-  the relation by setting `:on_replace` option in your association/embed
-  definition according to the values below:
+    * `cast_assoc/3` and `cast_embed/3` - those functions are used when
+      working with external data. In particular, they allow you to change
+      associations and embeds alongside the parent struct, all at once.
+
+    * `put_assoc/4` and `put_embed/4` - it allows you to replace the
+      association or embed as a whole. This can be used to move associated
+      data from one entry to another, to completely remove or replace
+      existing entries.
+
+  See the documentation for those functions for more information.
+
+  ### The `:on_replace` option
+
+  When using any of those APIs, you may run into situations where Ecto sees
+  data is being replaced. For example, imagine a Post has many Comments where
+  the commends have IDs 1, 2 and 3. If you call `cast_assoc/3` passing only
+  the IDs 1 and 2, Ecto will consider 3 is being "replaced" and it will raise
+  by default. Such behaviour can be changed when defining the relation by
+  setting `:on_replace` option when defining your association/embed according
+  to the values below:
 
     * `:raise` (default) - do not allow removing association or embedded
       data via parent changesets
@@ -173,24 +183,40 @@ defmodule Ecto.Changeset do
 
   ## Schemaless changesets
 
-  In the changeset examples so far, we have always used changesets to
-  validate and cast data contained in a struct, such as the `%User{}`
+  In the changeset examples so far, we have always used changesets to validate
+  and cast data contained in a struct defined by an Ecto schema, such as the `%User{}`
   struct defined by the `User` module.
 
-  However, changesets can also be used with data in a plain map, by
-  passing a tuple containing both the data and the supported types:
+  However, changesets can also be used with "regular" structs too by passing a tuple
+  with the data and its types:
 
-      data  = %{}
+      user = %User{}
       types = %{first_name: :string, last_name: :string, email: :string}
-
       changeset =
-        {data, types}
-        |> Ecto.Changeset.cast(params["sign_up"], Map.keys(types))
+        {user, types}
+        |> Ecto.Changeset.cast(params["name"], Map.keys(types))
         |> Ecto.Changeset.validate_required(...)
         |> Ecto.Changeset.validate_length(...)
 
-  Such functionality makes Ecto extremely useful to cast, validate and prune
-  data even if it is not meant to be persisted to the database.
+  where the user struct refers to the definition in the following module:
+
+      defmodule User do
+        defstruct [:name, :age]
+      end
+
+  Changesets can also be used with data in a plain map, by following the same API:
+
+      data  = %{}
+      types = %{name: :string}
+      params = %{name: "Callum"}
+      changeset =
+        {data, types}
+        |> Ecto.Changeset.cast(params, Map.keys(types))
+        |> Ecto.Changeset.validate_required(...)
+        |> Ecto.Changeset.validate_length(...)
+
+  Such functionality makes Ecto extremely useful to cast, validate and prune data even
+  if it is not meant to be persisted to the database.
 
   ### Changeset actions
 
@@ -334,7 +360,7 @@ defmodule Ecto.Changeset do
       "body"
 
   """
-  @spec change(Ecto.Schema.t | t | {data, types}, %{atom => term} | Keyword.t) :: t | no_return
+  @spec change(Ecto.Schema.t | t | {data, types}, %{atom => term} | Keyword.t) :: t
   def change(data, changes \\ %{})
 
   def change({data, types}, changes) when is_map(data) do
@@ -424,12 +450,12 @@ defmodule Ecto.Changeset do
   @spec cast(Ecto.Schema.t | t | {data, types},
              %{binary => term} | %{atom => term} | :invalid,
              [String.t | atom],
-             Keyword.t) :: t | no_return
+             Keyword.t) :: t
   def cast(data, params, permitted, opts \\ [])
 
   def cast(_data, %{__struct__: _} = params, _permitted, _opts) do
     raise Ecto.CastError, type: :map, value: params,
-                          message: "expected params to be a :map, got: `#{inspect params}`"
+                          message: "expected params to be a :map, got: `#{inspect(params)}`"
   end
 
   def cast({data, types}, params, permitted, opts) when is_map(data) do
@@ -530,13 +556,17 @@ defmodule Ecto.Changeset do
       %{^param_key => value} ->
         value = if value in empty_values, do: Map.get(defaults, key), else: value
         case Ecto.Type.cast(type, value) do
-          {:ok, ^current} ->
-            :missing
           {:ok, value} ->
-            {:ok, value, valid?}
+            if Ecto.Type.equal?(type, current, value) do
+              :missing
+            else
+              {:ok, value, valid?}
+            end
+
           :error ->
             :invalid
         end
+
       _ ->
         :missing
     end
@@ -573,7 +603,7 @@ defmodule Ecto.Changeset do
   This function should be used when working with the entire association at
   once (and not a single element of a many-style association) and using data
   external to the application.
-  
+
   `cast_assoc/3` works matching the records extracted form the database (preload)
   and compares it with the parameters provided form an external source.
 
@@ -619,8 +649,8 @@ defmodule Ecto.Changeset do
 
   Every time the `MyApp.Address.changeset/2` function is invoked, it must
   return a changeset. This changeset will be applied to your Repo with
-  the propper action accordingly.
-  
+  the proper action accordingly.
+
   Note developers are allowed to explicitly set the `:action` field of a
   changeset to instruct Ecto how to act in certain situations. Let's suppose
   that, if one of the associations has only empty fields, you want to ignore
@@ -640,40 +670,6 @@ defmodule Ecto.Changeset do
             changeset
         end
       end
-
-  ## Alternatives to cast_assoc/3
-
-  `cast_assoc/3` is useful when the associated data is managed alongside
-  the parent struct, all at once.
-
-  To work with a single element of an association, other functions are
-  more appropriate. For example to insert a single associated struct for a
-  `has_many` association it's much easier to construct the associated struct
-  with `Ecto.build_assoc/3` and persist it directly with `c:Ecto.Repo.insert/2`.
-
-  Furthermore, if each side of the association is managed separately,
-  it is preferable to use `put_assoc/3` and directly instruct Ecto how
-  the association should look like.
-
-  For example, imagine you are receiving a set of tags you want to
-  associate to an user. Those tags are meant to exist upfront. Using
-  `cast_assoc/3` won't work as desired because the tags are not managed
-  alongside the user. In such cases, `put_assoc/3` will work as desired.
-  With the given parameters:
-
-      %{"name" => "john doe", "tags" => ["learner"]}
-
-  and then:
-
-      tags = Repo.all(from t in Tag, where: t.name in ^params["tags"])
-
-      user
-      |> Repo.preload(:tags)
-      |> Ecto.Changeset.cast(params) # No need to allow :tags as we put them directly
-      |> Ecto.Changeset.put_assoc(:tags, tags) # Explicitly set the tags
-
-  Note the changeset must have been previously `cast` using `cast/4`
-  before this function is invoked.
 
   ## Options
 
@@ -864,7 +860,7 @@ defmodule Ecto.Changeset do
       ** (ArgumentError) different :data when merging changesets
 
   """
-  @spec merge(t, t) :: t | no_return
+  @spec merge(t, t) :: t
   def merge(changeset1, changeset2)
 
   def merge(%Changeset{data: data} = cs1, %Changeset{data: data} = cs2) do
@@ -1076,7 +1072,7 @@ defmodule Ecto.Changeset do
       %{title: "bar"}
 
   """
-  @spec put_change(t, atom, term) :: t | no_return
+  @spec put_change(t, atom, term) :: t
   def put_change(%Changeset{types: nil}, _key, _value) do
     raise ArgumentError, "changeset does not have types information"
   end
@@ -1104,69 +1100,176 @@ defmodule Ecto.Changeset do
     end
   end
 
-  defp put_change(data, changes, errors, valid?, key, value, _type) do
+  defp put_change(data, changes, errors, valid?, key, value, type) do
     cond do
-      Map.get(data, key) != value ->
+      not Ecto.Type.equal?(type, Map.get(data, key), value) ->
         {Map.put(changes, key, value), errors, valid?}
+
       Map.has_key?(changes, key) ->
         {Map.delete(changes, key), errors, valid?}
+
       true ->
         {changes, errors, valid?}
     end
   end
 
   @doc """
-  Puts the given association as a change in the changeset.
+  Puts the given association entry or entries as a change in the changeset.
 
-  This function should be used when working with the entire association at
-  once (and not a single element of a many-style association) and using data
-  internal to the application.
+  This function is used to work with associations as a whole. For example,
+  if a Post has many Comments, it allows you to replace, change or move all
+  comments at once. If your goal is to simply add a new comment to a post,
+  then it is preferred to do so manually, as we will describe later in the
+  "Example: Adding a comment to a post" section.
 
-  When updating the data, this function requires the association to have been
-  preloaded in the changeset struct. Missing data will invoke the `:on_replace`
-  behaviour defined on the association. Preloading is not necessary for newly
-  built structs.
+  This function requires the associated data to have been preloaded, except
+  when the parent changeset has been newly build and not yet persisted.
+  Missing data will invoke the `:on_replace` behaviour defined on the
+  association.
 
-  The given value may either be the association struct, a changeset for the
-  given association or a map or keyword list of changes to be applied to the
-  current association. On all cases, it is expected the keys to be atoms. If a
-  map or keyword list are given and there is no association, one will be created.
+  For associations with cardinality one, `nil` can be used to remove the existing
+  entry. For associations with many entries, an empty list may be given instead.
 
   If the association has no changes, it will be skipped. If the association is
   invalid, the changeset will be marked as invalid. If the given value is not any
-  of the above, it will raise.
+  of values below, it will raise.
 
-  Also see `cast_assoc/3` for a discussion of when to use `cast_assoc/3` and
-  `put_assoc/3`.
+  The associated data may be given in different formats:
 
-  Although it accepts an `opts` argument, there are no options currently supported
-  by `put_assoc/4`.
+    * a map or a keyword list representing changes to be applied to the
+      associated data. A map or keyword list can be given to update an
+      existing association as long as they have matching primary keys.
+      For example, `put_assoc(changeset, :comments, [%{id: 1, title: "changed"}])`
+      will locate the comment with `:id` of 1 and update its title.
+      If a map or keyword list are given and there is no association,
+      one will be created. On all cases, it is expected the keys to be
+      atoms.
+
+    * changesets or structs - when a changeset or struct is given, they
+      are treated as the canonical data and the associated data currently
+      stored in the association is ignored. For instance, the operation
+      `put_assoc(changeset, :comments, [%Comment{id: 1, title: "changed"}])`
+      will send the `Comment` as is to the database, ignoring any comment
+      currently associated, even if a matching ID is found. If the comment
+      is already persisted to the database, then `put_assoc/4` only takes
+      care of guaranteeing that the comments and the parent data are associated.
+      This extremely useful when associating existing data, as we will see
+      in the "Example: Adding tags to a post" section.
+
+  Note, however, that `put_assoc/4` always expected all associated data to be
+  given. So in both examples above, if the changeset has any other comment besides
+  the comment with `id` equal to 1, all of them will be considered as replaced,
+  invoking the relevant `:on_replace` callback which may potentially remove the
+  data. Since only the comment with a id equal to 1 is given, it will be the
+  only one kept. Therefore, `put_assoc/4` always works with the whole data,
+  which may be undesired in some cases. Let's see an example.
+
+  ## Example: Adding a comment to a post
+
+  Imagine a relationship where Post has many comments and you want to add a
+  new comment to an existing post. While it is possible to use `put_assoc/4`
+  for this, it would be unecessarily complex. Let's see an example.
+
+  First, let's fetch the post with all existing comments:
+
+      post = Post |> Repo.get!(1) |> Repo.preload(:comments)
+
+  The following approach is **wrong**:
+
+      post
+      |> Ecto.Changeset.put_assoc(:comments, [%Comment{body: "bad example!"}])
+      |> Repo.update!()
+
+  The reason why the example above is wrong is because `put_assoc/4` always
+  works with the **full data**. So the example above will effectively **erase
+  all previous comments** and only keep the comment you are currently adding.
+  Instead, you could try:
+
+      post
+      |> Ecto.Changeset.put_assoc(:comments, [%Comment{body: "so-so example!"} | post.comments])
+      |> Repo.update!()
+
+  In this example, we prepend the new comment to the list of existing comments.
+  Ecto will diff the list of comments currently in `post` with the list of comments
+  given, and correctly insert the new comment to the database. Note, however,
+  Ecto is doing a lot of work just to figure out something we knew since the
+  beginning, which is that there is only one new comment.
+
+  In cases like above, when you want to work only on a single entry, it is
+  much easier to simply work on the associated directly. For example, we
+  could instead set the `post` association in the comment:
+
+      %Comment{body: "better example"}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:post, post)
+      |> Repo.insert!()
+
+  Alternatively, we can make sure that when we create a comment, it is already
+  associated to the post:
+
+      Ecto.build_assoc(post, :comments)
+      |> Ecto.Changeset.change(body: "great example!")
+      |> Repo.insert!()
+
+  Or we can simply set the post_id in the comment itself:
+
+      %Comment{body: "better example", post_id: post.id}
+      |> Repo.insert!()
+
+  In other words, when you find yourself wanting to work only with a subset
+  of the data, then using `put_assoc/4` is most likely unnecessary. Instead,
+  you want to work on the other side of the association.
+
+  Let's see an example where using `put_assoc/4` is a good fit.
+
+  ## Example: Adding tags to a post
+
+  Imagine you are receiving a set of tags you want to associate to a post.
+  Let's imagine that those tags exist upfront and are all persisted to the
+  database. Imagine we get the data in this format:
+
+      params = %{"title" => "new post", "tags" => ["learner"]}
+
+  Now, since the tags already exist, we will bring all of them from the
+  database and put them directly in the post:
+
+      tags = Repo.all(from t in Tag, where: t.name in ^params["tags"])
+
+      post
+      |> Repo.preload(:tags)
+      |> Ecto.Changeset.cast(params, [:title]) # No need to allow :tags as we put them directly
+      |> Ecto.Changeset.put_assoc(:tags, tags) # Explicitly set the tags
+
+  Since in this case we always require the user to pass all tags
+  directly, using `put_assoc/4` is a great fit. It will automatically
+  remove any tag not given and properly associate all of the given
+  tags with the post.
+
+  Furthermore, since the tag information is given as structs read directly
+  from the database, Ecto will treat the data as correct and only do the
+  minimum necessary to guarantee that posts and tags are associated,
+  without trying to update or diff any of the fields in the tag struct.
   """
   def put_assoc(%Changeset{} = changeset, name, value, opts \\ []) do
     put_relation(:assoc, changeset, name, value, opts)
   end
 
   @doc """
-  Puts the given embed as a change in the changeset.
+  Puts the given embed entry or entries as a change in the changeset.
 
-  The given value may either be the embed struct, a
-  changeset for the given embed or a map or keyword
-  list of changes to be applied to the current embed.
-  On all cases, it is expected the keys to be atoms.
-  If a map or keyword list are given and there is no
-  embed, one will be created.
+  This function is used to work with embeds as a whole. For embeds with
+  cardinality one, `nil` can be used to remove the existing entry. For
+  embeds with many entries, an empty list may be given instead.
 
-  If the embed has no changes, it will be skipped.
-  If the embed is invalid, the changeset will be marked
-  as invalid. If the given value is not an embed struct
-  or changeset, it will raise.
+  If the embed has no changes, it will be skipped. If the embed is
+  invalid, the changeset will be marked as invalid.
 
-  Also see `cast_assoc/3` for a discussion of when to use
-  `cast_assoc/3` and `put_assoc/3` which also applies to
-  `put_embed/3`.
+  The list of supported values and their behaviour is described in
+  `put_assoc/4`. If the given value is not any of values listed there,
+  it will raise.
 
-  Although it accepts an `opts` argument, there are no
-  options currently supported by `put_embed/4`.
+  Although this function accepts an `opts` argument, there are no options
+  currently supported by `put_embed/4`.
   """
   def put_embed(%Changeset{} = changeset, name, value, opts \\ []) do
     put_relation(:embed, changeset, name, value, opts)
@@ -1202,7 +1305,7 @@ defmodule Ecto.Changeset do
       %{title: "bar", author: "bar"}
 
   """
-  @spec force_change(t, atom, term) :: t | no_return
+  @spec force_change(t, atom, term) :: t
   def force_change(%Changeset{types: nil}, _key, _value) do
     raise ArgumentError, "changeset does not have types information"
   end
@@ -1480,7 +1583,7 @@ defmodule Ecto.Changeset do
 
   """
   @spec validate_required(t, list | atom, Keyword.t) :: t
-  def validate_required(%Changeset{} = changeset, fields, opts \\ []) do
+  def validate_required(%Changeset{} = changeset, fields, opts \\ []) when not is_nil(fields) do
     %{required: required, errors: errors, changes: changes} = changeset
     message = message(opts, "can't be blank")
     trim = Keyword.get(opts, :trim, true)
@@ -1811,7 +1914,7 @@ defmodule Ecto.Changeset do
       validate_number(changeset, :the_answer_to_life_the_universe_and_everything, equal_to: 42)
 
   """
-  @spec validate_number(t, atom, Keyword.t) :: t | no_return
+  @spec validate_number(t, atom, Keyword.t) :: t
   def validate_number(changeset, field, opts) do
     validate_change changeset, field, {:number, opts}, fn
       field, value ->
@@ -2038,7 +2141,7 @@ defmodule Ecto.Changeset do
       iex> Ecto.Changeset.optimistic_lock(post, :lock_uuid, fn _ -> Ecto.UUID.generate end)
 
   """
-  @spec optimistic_lock(Ecto.Schema.t | t, atom, (term -> term)) :: t | no_return
+  @spec optimistic_lock(Ecto.Schema.t | t, atom, (term -> term)) :: t
   def optimistic_lock(data_or_changeset, field, incrementer \\ &(&1 + 1)) do
     changeset = change(data_or_changeset, %{})
     current = get_field(changeset, field)
@@ -2312,7 +2415,7 @@ defmodule Ecto.Changeset do
       name is inferred from the table + association field.
       May be required explicitly for complex cases
   """
-  @spec assoc_constraint(t, atom, Keyword.t) :: t | no_return
+  @spec assoc_constraint(t, atom, Keyword.t) :: t
   def assoc_constraint(changeset, assoc, opts \\ []) do
     constraint = opts[:name] ||
       case get_assoc(changeset, assoc) do
@@ -2362,7 +2465,7 @@ defmodule Ecto.Changeset do
       field. May be required explicitly for complex cases
 
   """
-  @spec no_assoc_constraint(t, atom, Keyword.t) :: t | no_return
+  @spec no_assoc_constraint(t, atom, Keyword.t) :: t
   def no_assoc_constraint(changeset, assoc, opts \\ []) do
     {constraint, message} =
       case get_assoc(changeset, assoc) do

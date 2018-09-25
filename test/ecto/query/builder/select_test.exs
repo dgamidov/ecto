@@ -47,7 +47,7 @@ defmodule Ecto.Query.Builder.SelectTest do
              escape(quote do {map(x, [:foo, :bar]), map(x, [baz: :bat])} end, [x: 0], __ENV__)
 
       assert_raise Ecto.Query.CompileError,
-                   ~r"cannot apply select_merge because the binding at position 0",
+                   ~r"cannot select_merge because the binding at position 0",
                    fn ->
         escape(quote do {map(x, [:foo, :bar]), struct(x, [baz: :bat])} end, [x: 0], __ENV__)
       end
@@ -85,12 +85,10 @@ defmodule Ecto.Query.Builder.SelectTest do
           select: %{},
           select_merge: %{a: map(p, [:title]), b: ^0},
           select_merge: %{c: map(p, [:title, :body]), d: ^1}
-      assert Macro.to_string(query.select.expr) ==
-             "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
-      assert query.select.params ==
-             [{0, :any}, {1, :any}]
-      assert query.select.take ==
-             %{0 => {:map, [:title, :body]}}
+
+      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
+      assert query.select.params == [{0, :any}, {1, :any}]
+      assert query.select.take == %{0 => {:map, [:title, :body]}}
     end
 
     test "merges at runtime" do
@@ -100,12 +98,31 @@ defmodule Ecto.Query.Builder.SelectTest do
         |> select_merge([p], %{a: map(p, [:title]), b: ^0})
         |> select_merge([p], %{c: map(p, [:title, :body]), d: ^1})
 
-      assert Macro.to_string(query.select.expr) ==
-             "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
-      assert query.select.params ==
-             [{0, :any}, {1, :any}]
-      assert query.select.take ==
-             %{0 => {:map, [:title, :body]}}
+      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
+      assert query.select.params == [{0, :any}, {1, :any}]
+      assert query.select.take == %{0 => {:map, [:title, :body]}}
+    end
+
+    test "merges at the root" do
+      query =
+        "posts"
+        |> select([], %{})
+        |> select_merge([p], map(p, [:title]))
+        |> select_merge([p], %{body: ^"body"})
+
+      assert Macro.to_string(query.select.expr) == "merge(&0, %{body: ^0})"
+      assert query.select.params == [{"body", :any}]
+      assert query.select.take == %{0 => {:map, [:title]}}
+    end
+
+    test "supports '...' in binding list with no prior select" do
+      query =
+        "posts"
+        |> select_merge([..., p], %{title: p.title})
+
+      assert Macro.to_string(query.select.expr) == "merge(&0, %{title: &0.title()})"
+      assert query.select.params == []
+      assert query.select.take == %{}
     end
 
     test "raises on incompatible pairs" do
@@ -148,7 +165,7 @@ defmodule Ecto.Query.Builder.SelectTest do
       _ = from p in "posts", select: p, select_merge: struct(p, [:title]), select_merge: struct(p, [:body])
 
       assert_raise Ecto.Query.CompileError,
-                   ~r"cannot apply select_merge because the binding at position 0",
+                   ~r"cannot select_merge because the binding at position 0",
                    fn ->
         from p in "posts", select: map(p, [:title]), select_merge: struct(p, [:title])
       end

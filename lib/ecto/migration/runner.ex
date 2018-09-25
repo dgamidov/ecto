@@ -229,7 +229,12 @@ defmodule Ecto.Migration.Runner do
   defp table_reverse([{:remove, name, type, opts}| t], acc) do
     table_reverse(t, [{:add, name, type, opts} | acc])
   end
-
+  defp table_reverse([{:modify, name, type, opts} | t], acc) do
+    case opts[:from] do
+      nil -> false
+      from -> table_reverse(t, [{:modify, name, from, Keyword.put(opts, :from, type)} | acc])
+    end
+  end
   defp table_reverse([{:add, name, _type, _opts} | t], acc) do
     table_reverse(t, [{:remove, name} | acc])
   end
@@ -257,7 +262,9 @@ defmodule Ecto.Migration.Runner do
 
   defp log_and_execute_ddl(repo, %{level: level, sql: sql}, command) do
     log(level, command(command))
-    repo.__adapter__.execute_ddl(repo, command, [timeout: :infinity, log: sql])
+    meta = Ecto.Adapter.lookup_meta(repo)
+    {:ok, _} = repo.__adapter__.execute_ddl(meta, command, timeout: :infinity, log: sql)
+    :ok
   end
 
   defp log(false, _msg), do: :ok

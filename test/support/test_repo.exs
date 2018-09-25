@@ -1,5 +1,8 @@
 defmodule Ecto.TestAdapter do
   @behaviour Ecto.Adapter
+  @behaviour Ecto.Adapter.Queryable
+  @behaviour Ecto.Adapter.Schema
+  @behaviour Ecto.Adapter.Transaction
 
   alias Ecto.Migration.SchemaMigration
 
@@ -9,14 +12,14 @@ defmodule Ecto.TestAdapter do
     {:ok, []}
   end
 
-  def child_spec(_repo, opts) do
+  def init(opts) do
     :ecto   = opts[:otp_app]
     "user"  = opts[:username]
     "pass"  = opts[:password]
     "hello" = opts[:database]
     "local" = opts[:hostname]
 
-    Supervisor.Spec.worker(Task, [fn -> :timer.sleep(:infinity) end])
+    {:ok, Supervisor.Spec.worker(Task, [fn -> :timer.sleep(:infinity) end]), %{meta: :meta}}
   end
 
   ## Types
@@ -35,101 +38,125 @@ defmodule Ecto.TestAdapter do
 
   def prepare(operation, query), do: {:nocache, {operation, query}}
 
-  def execute(_repo, _, {:nocache, {:all, %{select: %{fields: [_|_] = fields}}}}, _, _) do
-    # Pad nil values after first
-    values = List.duplicate(nil, length(fields) - 1)
-    Process.get(:test_repo_all_results, {1, [[1 | values]]})
+  # Migration emulation
+
+  def execute(_, _, {:nocache, {:all, %{from: %{source: {"schema_migrations", _}}}}}, _, _) do
+    {length(migrated_versions()), Enum.map(migrated_versions(), &List.wrap/1)}
   end
 
-  def execute(_repo, _, {:nocache, {:all, %{select: %{fields: []}}}}, _, _) do
-    Process.get(:test_repo_all_results, {1, [[]]})
-  end
-
-  def execute(_repo, _meta, {:nocache, {:delete_all, %{from: %{source: {_, SchemaMigration}}}}}, [version], _) do
+  def execute(_, _meta, {:nocache, {:delete_all, %{from: %{source: {_, SchemaMigration}}}}}, [version], _) do
     Process.put(:migrated_versions, List.delete(migrated_versions(), version))
     {1, nil}
   end
 
-  def execute(_repo, meta, {:nocache, {op, %{from: %{source: {source, _}}}}}, _params, _opts) do
-    send test_process(), {op, {meta.prefix, source}}
+  # Regular operations
+
+  def execute(_, _, {:nocache, {:all, query}}, _, _) do
+    send test_process(), {:all, query}
+    Process.get(:test_repo_all_results) || results_for_all_query(query)
+  end
+
+  def execute(_, _meta, {:nocache, {op, query}}, _params, _opts) do
+    send test_process(), {op, query}
     {1, nil}
   end
 
-  def stream(repo, meta, prepared, params, opts) do
-    Stream.map([:execute], fn(:execute) ->
-      send test_process(), :stream_execute
-      execute(repo, meta, prepared, params, opts)
+  def stream(_, _meta, {:nocache, {:all, query}}, _params, _opts) do
+    Stream.map([:execute], fn :execute ->
+      send test_process(), {:stream, query}
+      results_for_all_query(query)
     end)
+  end
+
+  defp results_for_all_query(%{select: %{fields: [_ | _] = fields}}) do
+    values = List.duplicate(nil, length(fields) - 1)
+    {1, [[1 | values]]}
+  end
+
+  defp results_for_all_query(%{select: %{fields: []}}) do
+    {1, [[]]}
   end
 
   ## Schema
 
-  def insert_all(_repo, meta, _header, rows, _on_conflict, _returning, _opts) do
+  def insert_all(_, meta, _header, rows, _on_conflict, _returning, _opts) do
     %{source: source, prefix: prefix} = meta
     send test_process(), {:insert_all, {prefix, source}, rows}
     {1, nil}
   end
 
-  def insert(_repo, %{source: "schema_migrations"}, val, _, _, _) do
+  def insert(_, %{source: "schema_migrations"}, val, _, _, _) do
     version = Keyword.fetch!(val, :version)
-    Process.put(:migrated_versions, [version|migrated_versions()])
+    Process.put(:migrated_versions, [version | migrated_versions()])
     {:ok, []}
   end
 
-  def insert(_repo, %{context: nil} = meta, _fields, _on_conflict, return, _opts) do
+  def insert(_, %{context: nil} = meta, _fields, _on_conflict, return, _opts) do
     %{source: source, prefix: prefix} = meta
     send(test_process(), {:insert, {prefix, source}})
     {:ok, Enum.zip(return, 1..length(return))}
   end
 
-  def insert(_repo, %{context: {:invalid, _} = res}, _fields, _on_conflict, _return, _opts) do
-    res
+  def insert(_, %{context: context}, _fields, _on_conflict, _return, _opts) do
+    context
   end
 
   # Notice the list of changes is never empty.
-  def update(_repo, %{context: nil, source: source, prefix: prefix}, [_|_], _filters, return, _opts) do
+  def update(_, %{context: nil} = schema_meta, [_ | _], _filters, return, _opts) do
+    %{source: source, prefix: prefix} = schema_meta
     send(test_process(), {:update, {prefix, source}})
     {:ok, Enum.zip(return, 1..length(return))}
   end
 
-  def update(_repo, %{context: {:invalid, _} = res}, [_|_], _filters, _return, _opts) do
-    res
+  def update(_, %{context: context}, [_ | _], _filters, _return, _opts) do
+    context
   end
 
-  def delete(_repo, meta, _filter, _opts) do
-    %{source: source, prefix: prefix} = meta
+  def delete(_, %{context: nil} = schema_meta, _filter, _opts) do
+    %{source: source, prefix: prefix} = schema_meta
     send(test_process(), {:delete, {prefix, source}})
     {:ok, []}
   end
 
+  def delete(_, %{context: context}, _filter, _opts) do
+    context
+  end
+
   ## Transactions
 
-  def transaction(_repo, _opts, fun) do
+  def transaction(mod, _opts, fun) do
     # Makes transactions "trackable" in tests
+    Process.put({mod, :in_transaction?}, true)
     send test_process(), {:transaction, fun}
     try do
       {:ok, fun.()}
     catch
       :throw, {:ecto_rollback, value} ->
         {:error, value}
+    after
+      Process.delete({mod, :in_transaction?})
     end
   end
 
-  def rollback(_repo, value) do
+  def in_transaction?(mod) do
+    Process.get({mod, :in_transaction?}) || false
+  end
+
+  def rollback(_, value) do
     send test_process(), {:rollback, value}
     throw {:ecto_rollback, value}
   end
 
   ## Migrations
 
-  def lock_for_migrations(_repo, _query, _opts, fun) do
+  def lock_for_migrations(_, query, _opts, fun) do
     send test_process(), {:lock_for_migrations, fun}
-    fun.(migrated_versions())
+    fun.(query)
   end
 
-  def execute_ddl(_repo, command, _) do
+  def execute_ddl(_, command, _) do
     Process.put(:last_command, command)
-    :ok
+    {:ok, []}
   end
 
   defp migrated_versions do
